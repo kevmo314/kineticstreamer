@@ -6,56 +6,45 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.ActivityInfo
-import android.hardware.camera2.CameraManager
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
-import android.os.RemoteException
 import android.util.Log
+import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.ViewGroup
 import android.view.WindowManager
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.camera.core.Preview
-import androidx.camera.core.processing.OpenGlRenderer
-import androidx.camera.view.PreviewView
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.safeGesturesPadding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cameraswitch
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.runtime.Composable
-import androidx.compose.ui.Modifier
-import androidx.compose.material3.Button
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.window.Dialog
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
-import com.google.accompanist.permissions.PermissionStatus
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
 import com.kevmo314.kineticstreamer.ui.theme.KineticStreamerTheme
-import kotlinx.coroutines.launch
-
 
 class MainActivity : ComponentActivity() {
     companion object {
@@ -100,96 +89,132 @@ class MainActivity : ComponentActivity() {
                         }
                     } else {
                         val cameraSelectorDialogOpen = remember { mutableStateOf(false) }
-                        val cameraManager =
-                            applicationContext.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-                        val selectedCameraId =
-                            remember { mutableStateOf(cameraManager.cameraIdList[0]) }
+                        val streamingService = remember { mutableStateOf<IStreamingService?>(null) }
 
-                        LaunchedEffect(Unit) {
-                            startForegroundService(
+                        DisposableEffect(applicationContext) {
+                            val connection = object : ServiceConnection {
+                                override fun onServiceConnected(
+                                    className: ComponentName,
+                                    service: IBinder
+                                ) {
+                                    streamingService.value =
+                                        IStreamingService.Stub.asInterface(service)
+                                }
+
+                                override fun onServiceDisconnected(name: ComponentName?) {
+                                    streamingService.value = null
+                                }
+                            }
+
+                            bindService(
                                 Intent(
                                     applicationContext,
                                     StreamingService::class.java
-                                )
+                                ).apply {
+                                    action = IStreamingService::class.java.name
+                                }, connection, Context.BIND_AUTO_CREATE
                             )
+
+                            onDispose {
+                                unbindService(connection)
+                            }
                         }
 
-                        AndroidView(
-                            modifier = Modifier.fillMaxSize(),
-                            factory = { context ->
-                                val surfaceView = SurfaceView(context).apply {
-                                    layoutParams = ViewGroup.LayoutParams(
-                                        ViewGroup.LayoutParams.MATCH_PARENT,
-                                        ViewGroup.LayoutParams.MATCH_PARENT
+                        val stub = streamingService.value
+
+                        if (stub != null) {
+                            val isStreaming = remember(stub) { mutableStateOf(stub.isStreaming) }
+
+                            AndroidView(
+                                modifier = Modifier.fillMaxSize(),
+                                factory = { context ->
+                                    SurfaceView(context).apply {
+                                        layoutParams = ViewGroup.LayoutParams(
+                                            ViewGroup.LayoutParams.MATCH_PARENT,
+                                            ViewGroup.LayoutParams.MATCH_PARENT
+                                        )
+                                        holder.addCallback(object : SurfaceHolder.Callback {
+                                            override fun surfaceCreated(holder: SurfaceHolder) {
+                                                Log.i("MainActivity", "surfaceCreated")
+
+                                                streamingService.value?.setPreviewSurface(
+                                                    holder.surface
+                                                )
+                                            }
+
+                                            override fun surfaceChanged(
+                                                holder: SurfaceHolder,
+                                                format: Int,
+                                                width: Int,
+                                                height: Int
+                                            ) {
+                                                Log.i("MainActivity", "surfaceChanged")
+                                            }
+
+                                            override fun surfaceDestroyed(holder: SurfaceHolder) {
+                                                Log.i("MainActivity", "surfaceDestroyed")
+
+                                                streamingService.value?.setPreviewSurface(null)
+                                            }
+
+                                        })
+                                    }
+                                },
+                            )
+
+                            Column(
+                                horizontalAlignment = Alignment.End,
+                                verticalArrangement = Arrangement.SpaceEvenly,
+                                modifier = Modifier.safeGesturesPadding(),
+                            ) {
+                                IconButton(
+                                    modifier = Modifier.size(32.dp),
+                                    onClick = {
+                                        // show camera selector dialog
+                                        cameraSelectorDialogOpen.value = true
+                                    },
+                                ) {
+                                    Icon(
+                                        Icons.Filled.Cameraswitch,
+                                        contentDescription = "Switch camera",
+                                        modifier = Modifier.fillMaxSize(),
+                                        tint = Color.White,
                                     )
                                 }
-
-                                bindService(
-                                    Intent(
-                                        applicationContext,
-                                        StreamingService::class.java
-                                    ).apply {
-                                        action = IStreamingService::class.java.name
-                                    }, object : ServiceConnection {
-                                        override fun onServiceConnected(
-                                            className: ComponentName,
-                                            service: IBinder
-                                        ) {
-                                            IStreamingService.Stub.asInterface(service)
-                                                .setPreviewSurface(
-                                                    surfaceView.holder.surface
-                                                )
+                                Button(
+                                    onClick = {
+                                        if (isStreaming.value) {
+                                            stub.stopStreaming()
+                                        } else {
+                                            stub.startStreaming()
                                         }
-
-                                        override fun onServiceDisconnected(name: ComponentName?) {
-                                            TODO("Not yet implemented")
-                                        }
-                                    }, Context.BIND_AUTO_CREATE
-                                )
-
-                                surfaceView
+                                    },
+                                    modifier = Modifier.size(64.dp),
+                                    shape = if (isStreaming.value) {
+                                        RoundedCornerShape(2.dp)
+                                    } else {
+                                        CircleShape
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color.Red),
+                                ) {
+                                }
+                                TextButton({
+                                }) {
+                                    Text("Stoasdfasdfasdfp")
+                                }
                             }
-                        )
 
-                        Column(
-                            horizontalAlignment = Alignment.End,
-                            verticalArrangement = Arrangement.SpaceEvenly,
-                            modifier = Modifier.safeGesturesPadding(),
-                        ) {
-                            IconButton(
-                                modifier = Modifier.size(32.dp),
-                                onClick = {
-                                    // show camera selector dialog
-                                    cameraSelectorDialogOpen.value = true
-                                },
-                            ) {
-                                Icon(
-                                    Icons.Filled.Cameraswitch,
-                                    contentDescription = "Switch camera",
-                                    modifier = Modifier.fillMaxSize(),
-                                    tint = Color.White,
+                            if (cameraSelectorDialogOpen.value) {
+                                CameraSelector(
+                                    onDismissRequest = {
+                                        cameraSelectorDialogOpen.value = false
+                                    },
+                                    selectedCameraId = stub.activeCameraId,
+                                    onCameraSelected = {
+                                        stub.activeCameraId = it
+                                    },
                                 )
                             }
-                            TextButton({
-                            }) {
-                                Text("Start streaming")
-                            }
-                            TextButton({
-                            }) {
-                                Text("Stoasdfasdfasdfp")
-                            }
-                        }
-
-                        if (cameraSelectorDialogOpen.value) {
-                            CameraSelector(
-                                onDismissRequest = {
-                                    cameraSelectorDialogOpen.value = false
-                                },
-                                selectedCameraId = selectedCameraId.value,
-                                onCameraSelected = {
-                                    selectedCameraId.value = it
-                                },
-                            )
                         }
                     }
                 }
