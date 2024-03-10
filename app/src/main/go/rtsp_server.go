@@ -108,21 +108,30 @@ func NewRTSPServerSink() (*RTSPServerSink, error) {
 }
 
 func (s *RTSPServerSink) AddH264Track() (*RTSPServerSinkH264Track, error) {
-	s.medias = []*description.Media{{
+	media := &description.Media{
 		Type: description.MediaTypeVideo,
 		Formats: []format.Format{&format.H264{
 			PayloadTyp:        96,
 			PacketizationMode: 1,
 		}},
-	}}
+	}
+	s.medias = append(s.medias, media)
+	return NewRTSPServerSinkH264Track(s, media, s.s.MaxPacketSize)
+}
+
+func (s *RTSPServerSink) writePacketRTP(media *description.Media, p *rtp.Packet) error {
+	return s.stream.WritePacketRTP(media, p)
+}
+
+func (s *RTSPServerSink) Connect() error {
 	s.stream = gortsplib.NewServerStream(s.s, &description.Session{
 		Medias: s.medias,
 	})
-	return NewRTSPServerSinkH264Track(s.stream, s.medias[0], s.s.MaxPacketSize)
+	return nil
 }
 
 type RTSPServerSinkH264Track struct {
-	stream *gortsplib.ServerStream
+	sink *RTSPServerSink
 
 	buffer *bytes.Buffer
 	reader *h264reader.H264Reader
@@ -134,7 +143,7 @@ type RTSPServerSinkH264Track struct {
 	media *description.Media
 }
 
-func NewRTSPServerSinkH264Track(stream *gortsplib.ServerStream, media *description.Media, mtu int) (*RTSPServerSinkH264Track, error) {
+func NewRTSPServerSinkH264Track(sink *RTSPServerSink, media *description.Media, mtu int) (*RTSPServerSinkH264Track, error) {
 	// TODO: Should sps/pps be required here?
 	buffer := &bytes.Buffer{}
 	reader, err := h264reader.NewReader(buffer)
@@ -142,7 +151,7 @@ func NewRTSPServerSinkH264Track(stream *gortsplib.ServerStream, media *descripti
 		return nil, err
 	}
 	return &RTSPServerSinkH264Track{
-		stream: stream,
+		sink:   sink,
 		buffer: buffer,
 		reader: reader,
 		packetizer: rtp.NewPacketizer(
@@ -185,7 +194,7 @@ func (t *RTSPServerSinkH264Track) WriteH264AnnexBSample(buf []byte, ptsMicroseco
 		samples := uint32((33 * time.Millisecond).Seconds() * 90000)
 		packets := t.packetizer.Packetize(nalu.Data, samples)
 		for _, p := range packets {
-			if err := t.stream.WritePacketRTP(t.media, p); err != nil {
+			if err := t.sink.writePacketRTP(t.media, p); err != nil {
 				return fmt.Errorf(
 					"t.stream.WritePacketRTP: %w",
 					err,

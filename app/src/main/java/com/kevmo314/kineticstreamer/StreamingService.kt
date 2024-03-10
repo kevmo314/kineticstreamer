@@ -66,7 +66,7 @@ class StreamingService : Service() {
                     var videoTrack = sink.addH264Track()
 
                     init {
-//                        sink.connect()
+                        sink.connect()
                     }
 
                     override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {
