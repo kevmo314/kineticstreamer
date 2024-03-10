@@ -2,6 +2,7 @@ package kinetic
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"log"
 	"sync"
@@ -22,6 +23,8 @@ type RTSPServerSink struct {
 	mutex     sync.Mutex
 	stream    *gortsplib.ServerStream
 	publisher *gortsplib.ServerSession
+
+	medias []*description.Media
 }
 
 // called when a connection is opened.
@@ -105,16 +108,17 @@ func NewRTSPServerSink() (*RTSPServerSink, error) {
 }
 
 func (s *RTSPServerSink) AddH264Track() (*RTSPServerSinkH264Track, error) {
-	s.stream = gortsplib.NewServerStream(s.s, &description.Session{
-		Medias: []*description.Media{{
-			Type: description.MediaTypeVideo,
-			Formats: []format.Format{&format.H264{
-				PayloadTyp:        96,
-				PacketizationMode: 1,
-			}},
+	s.medias = []*description.Media{{
+		Type: description.MediaTypeVideo,
+		Formats: []format.Format{&format.H264{
+			PayloadTyp:        96,
+			PacketizationMode: 1,
 		}},
+	}}
+	s.stream = gortsplib.NewServerStream(s.s, &description.Session{
+		Medias: s.medias,
 	})
-	return NewRTSPServerSinkH264Track(s.stream)
+	return NewRTSPServerSinkH264Track(s.stream, s.medias[0], s.s.MaxPacketSize)
 }
 
 type RTSPServerSinkH264Track struct {
@@ -126,9 +130,11 @@ type RTSPServerSinkH264Track struct {
 	packetizer rtp.Packetizer
 
 	ptsMicroseconds int64
+
+	media *description.Media
 }
 
-func NewRTSPServerSinkH264Track(stream *gortsplib.ServerStream) (*RTSPServerSinkH264Track, error) {
+func NewRTSPServerSinkH264Track(stream *gortsplib.ServerStream, media *description.Media, mtu int) (*RTSPServerSinkH264Track, error) {
 	// TODO: Should sps/pps be required here?
 	buffer := &bytes.Buffer{}
 	reader, err := h264reader.NewReader(buffer)
@@ -140,20 +146,21 @@ func NewRTSPServerSinkH264Track(stream *gortsplib.ServerStream) (*RTSPServerSink
 		buffer: buffer,
 		reader: reader,
 		packetizer: rtp.NewPacketizer(
-			1500,
+			uint16(mtu),
 			96,
 			0,
 			&codecs.H264Payloader{},
 			rtp.NewRandomSequencer(),
 			90000,
 		),
+		media: media,
 	}, nil
 }
 
 func (t *RTSPServerSinkH264Track) WriteH264AnnexBSample(buf []byte, ptsMicroseconds int64) error {
 	// append to buffer
 	if _, err := t.buffer.Write(buf); err != nil {
-		return err
+		return fmt.Errorf("t.buffer.Write: %w", err)
 	}
 	// calculate the duration
 	if t.ptsMicroseconds == 0 {
@@ -168,7 +175,7 @@ func (t *RTSPServerSinkH264Track) WriteH264AnnexBSample(buf []byte, ptsMicroseco
 			if err == io.EOF {
 				return nil
 			}
-			return err
+			return fmt.Errorf("h264reader.NextNAL: %w", err)
 		}
 		if nalu == nil {
 			return nil
@@ -178,16 +185,14 @@ func (t *RTSPServerSinkH264Track) WriteH264AnnexBSample(buf []byte, ptsMicroseco
 		samples := uint32((33 * time.Millisecond).Seconds() * 90000)
 		packets := t.packetizer.Packetize(nalu.Data, samples)
 		for _, p := range packets {
-			if err := t.stream.WritePacketRTP(&description.Media{
-				Type: description.MediaTypeVideo,
-				Formats: []format.Format{&format.H264{
-					PayloadTyp:        96,
-					PacketizationMode: 1,
-				}},
-			}, p); err != nil {
-				return err
+			if err := t.stream.WritePacketRTP(t.media, p); err != nil {
+				return fmt.Errorf(
+					"t.stream.WritePacketRTP: %w",
+					err,
+				)
 			}
 		}
+
 	}
 }
 

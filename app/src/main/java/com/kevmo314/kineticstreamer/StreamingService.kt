@@ -13,11 +13,16 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
+import android.os.Parcel
+import android.os.Parcelable
 import android.util.Log
 import android.view.Surface
 import androidx.core.app.NotificationCompat
 import kinetic.H264Track
+import kinetic.RTSPServerSink
 import kinetic.WHIPSink
+import kotlinx.parcelize.Parcelize
+
 
 class StreamingService : Service() {
     private val handlerThread by lazy {
@@ -37,7 +42,7 @@ class StreamingService : Service() {
             cameraSource?.setPreviewSurface(surface)
         }
 
-        override fun startStreaming() {
+        override fun startStreaming(config: StreamingConfiguration) {
             encoder = MediaCodec.createEncoderByType("video/avc").apply {
                 val format = MediaFormat.createVideoFormat(
                     name, 1920, 1080
@@ -56,11 +61,12 @@ class StreamingService : Service() {
                 configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
 
                 setCallback(object : MediaCodec.Callback() {
-                    var sink = WHIPSink("https://b.siobud.com/api/whip", "kevmo314")
-                    var videoTrack: H264Track = sink.addH264Track()
+                    var sink = RTSPServerSink()
+                    // var sink = WHIPSink("https://b.siobud.com/api/whip", "kevmo314")
+                    var videoTrack = sink.addH264Track()
 
                     init {
-                        sink.connect()
+//                        sink.connect()
                     }
 
                     override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {
