@@ -8,6 +8,7 @@ import android.content.Intent
 import android.hardware.camera2.CameraManager
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
+import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.os.Build
 import android.os.Handler
@@ -43,27 +44,15 @@ class StreamingService : Service() {
         }
 
         override fun startStreaming(config: StreamingConfiguration) {
-            encoder = MediaCodec.createEncoderByType("video/avc").apply {
-                val format = MediaFormat.createVideoFormat(
-                    name, 1920, 1080
-                )
-                format.setInteger(
-                    MediaFormat.KEY_COLOR_FORMAT,
-                    MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
-                )
-                format.setInteger(MediaFormat.KEY_BIT_RATE, 10 * 1024 * 1024)
-                format.setInteger(MediaFormat.KEY_FRAME_RATE, 25)
-                format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 3)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    format.setInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES, 1)
-                }
-
+            val format = config.toMediaFormat()
+            val codecName = MediaCodecList(MediaCodecList.REGULAR_CODECS).findEncoderForFormat(format)
+            encoder = MediaCodec.createByCodecName(codecName).apply {
                 configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
 
                 setCallback(object : MediaCodec.Callback() {
                     var sink = RTSPServerSink()
-                    // var sink = WHIPSink("https://b.siobud.com/api/whip", "kevmo314")
-                    var videoTrack = sink.addH264Track()
+//                     var sink = WHIPSink("https://b.siobud.com/api/whip", "kevmo314")
+                    var videoTrack = sink.addTrack("video/avc")
 
                     init {
                         sink.connect()
@@ -81,7 +70,7 @@ class StreamingService : Service() {
                         val buffer = codec.getOutputBuffer(index) ?: return
                         val array = ByteArray(info.size)
                         buffer.get(array, info.offset, info.size)
-                        videoTrack.writeH264AnnexBSample(array, info.presentationTimeUs)
+                        videoTrack.writeSample(array, info.presentationTimeUs)
                         codec.releaseOutputBuffer(index, false)
                     }
 
