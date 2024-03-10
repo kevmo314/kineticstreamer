@@ -116,7 +116,7 @@ func (s *RTSPServerSink) AddH264Track() (*RTSPServerSinkH264Track, error) {
 		}},
 	}
 	s.medias = append(s.medias, media)
-	return NewRTSPServerSinkH264Track(s, media, s.s.MaxPacketSize)
+	return NewRTSPServerSinkH264Track(s, media)
 }
 
 func (s *RTSPServerSink) writePacketRTP(media *description.Media, p *rtp.Packet) error {
@@ -143,7 +143,7 @@ type RTSPServerSinkH264Track struct {
 	media *description.Media
 }
 
-func NewRTSPServerSinkH264Track(sink *RTSPServerSink, media *description.Media, mtu int) (*RTSPServerSinkH264Track, error) {
+func NewRTSPServerSinkH264Track(sink *RTSPServerSink, media *description.Media) (*RTSPServerSinkH264Track, error) {
 	// TODO: Should sps/pps be required here?
 	buffer := &bytes.Buffer{}
 	reader, err := h264reader.NewReader(buffer)
@@ -155,12 +155,12 @@ func NewRTSPServerSinkH264Track(sink *RTSPServerSink, media *description.Media, 
 		buffer: buffer,
 		reader: reader,
 		packetizer: rtp.NewPacketizer(
-			uint16(mtu),
-			96,
+			uint16(sink.s.MaxPacketSize),
+			media.Formats[0].PayloadType(),
 			0,
 			&codecs.H264Payloader{},
 			rtp.NewRandomSequencer(),
-			90000,
+			uint32(media.Formats[0].ClockRate()),
 		),
 		media: media,
 	}, nil
@@ -189,9 +189,7 @@ func (t *RTSPServerSinkH264Track) WriteH264AnnexBSample(buf []byte, ptsMicroseco
 		if nalu == nil {
 			return nil
 		}
-		log.Printf("%d bytes, duration %v", len(nalu.Data), duration)
-
-		samples := uint32((33 * time.Millisecond).Seconds() * 90000)
+		samples := uint32(duration.Seconds() * float64(t.media.Formats[0].ClockRate()))
 		packets := t.packetizer.Packetize(nalu.Data, samples)
 		for _, p := range packets {
 			if err := t.sink.writePacketRTP(t.media, p); err != nil {
