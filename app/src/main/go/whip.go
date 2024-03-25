@@ -75,26 +75,52 @@ func NewWHIPSink(url, bearerToken string) (*WHIPSink, error) {
 	}, nil
 }
 
-func (s *WHIPSink) AddH264Track() (*H264Track, error) {
-	track, err := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{
-		MimeType: webrtc.MimeTypeH264,
-	}, uuid.NewString(), uuid.NewString())
-	if err != nil {
-		return nil, err
-	}
-	rtpSender, err := s.pc.AddTrack(track)
-	if err != nil {
-		return nil, err
-	}
-	go func() {
-		rtcpBuf := make([]byte, 1500)
-		for {
-			if _, _, rtcpErr := rtpSender.Read(rtcpBuf); rtcpErr != nil {
-				return
-			}
+func (s *WHIPSink) AddTrack(mediaFormatMimeType string) (SampleWriter, error) {
+	mimeType := MediaFormatMimeType(mediaFormatMimeType).PionMimeType()
+	switch mimeType {
+	case webrtc.MimeTypeH264:
+		track, err := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{
+			MimeType: webrtc.MimeTypeH264,
+		}, uuid.NewString(), uuid.NewString())
+		if err != nil {
+			return nil, fmt.Errorf("NewTrackLocalStaticSample: %w", err)
 		}
-	}()
-	return NewH264Track(track)
+		rtpSender, err := s.pc.AddTrack(track)
+		if err != nil {
+			return nil, fmt.Errorf("AddTrack: %w", err)
+		}
+		go func() {
+			rtcpBuf := make([]byte, 1500)
+			for {
+				if _, _, rtcpErr := rtpSender.Read(rtcpBuf); rtcpErr != nil {
+					return
+				}
+			}
+		}()
+		return NewH264Track(track)
+	case webrtc.MimeTypeVP8, webrtc.MimeTypeVP9, webrtc.MimeTypeAV1:
+		track, err := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{
+			MimeType: mimeType,
+		}, uuid.NewString(), uuid.NewString())
+		if err != nil {
+			return nil, fmt.Errorf("NewTrackLocalStaticSample: %w", err)
+		}
+		rtpSender, err := s.pc.AddTrack(track)
+		if err != nil {
+			return nil, fmt.Errorf("AddTrack: %w", err)
+		}
+		go func() {
+			rtcpBuf := make([]byte, 1500)
+			for {
+				if _, _, rtcpErr := rtpSender.Read(rtcpBuf); rtcpErr != nil {
+					return
+				}
+			}
+		}()
+		return NewIVFTrack(track)
+	default:
+		return nil, fmt.Errorf("unsupported mime type: %s", mimeType)
+	}
 }
 
 type H264Track struct {
@@ -119,7 +145,7 @@ func NewH264Track(track *webrtc.TrackLocalStaticSample) (*H264Track, error) {
 	}, nil
 }
 
-func (t *H264Track) WriteH264AnnexBSample(buf []byte, ptsMicroseconds int64) error {
+func (t *H264Track) WriteSample(buf []byte, ptsMicroseconds int64) error {
 	// append to buffer
 	if _, err := t.buffer.Write(buf); err != nil {
 		return err
@@ -149,11 +175,32 @@ func (t *H264Track) WriteH264AnnexBSample(buf []byte, ptsMicroseconds int64) err
 	}
 }
 
+type IVFTrack struct {
+	track           *webrtc.TrackLocalStaticSample
+	ptsMicroseconds int64
+}
+
+func NewIVFTrack(track *webrtc.TrackLocalStaticSample) (*IVFTrack, error) {
+	return &IVFTrack{track: track}, nil
+}
+
+func (t *IVFTrack) WriteSample(frame []byte, ptsMicroseconds int64) error {
+	// calculate the duration
+	if t.ptsMicroseconds == 0 {
+		t.ptsMicroseconds = ptsMicroseconds
+	}
+	duration := time.Duration(ptsMicroseconds-t.ptsMicroseconds) * time.Microsecond
+	t.ptsMicroseconds = ptsMicroseconds
+	log.Printf("%d bytes, duration %v", len(frame), duration)
+	return t.track.WriteSample(media.Sample{Data: frame, Duration: time.Millisecond * 33})
+}
+
 func (s *WHIPSink) Connect() error {
 	offer, err := s.pc.CreateOffer(nil)
 	if err != nil {
 		return err
 	}
+	log.Printf("offer: %+v", offer)
 	if err := s.pc.SetLocalDescription(offer); err != nil {
 		return err
 	}
@@ -178,6 +225,7 @@ func (s *WHIPSink) Connect() error {
 		Type: webrtc.SDPTypeAnswer,
 		SDP:  string(body),
 	}
+	log.Printf("answer: %+v", answer)
 	if err := s.pc.SetRemoteDescription(answer); err != nil {
 		return err
 	}

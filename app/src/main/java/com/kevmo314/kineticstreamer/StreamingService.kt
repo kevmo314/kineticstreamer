@@ -7,22 +7,17 @@ import android.content.Context
 import android.content.Intent
 import android.hardware.camera2.CameraManager
 import android.media.MediaCodec
-import android.media.MediaCodecInfo
 import android.media.MediaCodecList
 import android.media.MediaFormat
-import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
-import android.os.Parcel
-import android.os.Parcelable
 import android.util.Log
 import android.view.Surface
 import androidx.core.app.NotificationCompat
-import kinetic.H264Track
 import kinetic.RTSPServerSink
-import kinetic.WHIPSink
-import kotlinx.parcelize.Parcelize
+import kinetic.DiskSink
+import java.io.File
 
 
 class StreamingService : Service() {
@@ -49,14 +44,13 @@ class StreamingService : Service() {
             encoder = MediaCodec.createByCodecName(codecName).apply {
                 configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
 
-                setCallback(object : MediaCodec.Callback() {
-                    var sink = RTSPServerSink()
-//                     var sink = WHIPSink("https://b.siobud.com/api/whip", "kevmo314")
-                    var videoTrack = sink.addTrack("video/avc")
+                Log.i("StreamingService", "Encoder callback")
 
-                    init {
-                        sink.connect()
-                    }
+                setCallback(object : MediaCodec.Callback() {
+                    var diskSink = DiskSink(filesDir.absolutePath + File.separator + "kinetic",
+                        "video")
+                    var rtspServerSink = RTSPServerSink(diskSink, format.getString(MediaFormat.KEY_MIME))
+//                     var sink = WHIPSink("https://whip.vdo.ninja/asdasdf", "asdasdf")
 
                     override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {
                         Log.i("StreamingService", "Encoder input buffer available")
@@ -70,8 +64,30 @@ class StreamingService : Service() {
                         val buffer = codec.getOutputBuffer(index) ?: return
                         val array = ByteArray(info.size)
                         buffer.get(array, info.offset, info.size)
-                        videoTrack.writeSample(array, info.presentationTimeUs)
+
+                        diskSink.track(0).writeSample(array, info.presentationTimeUs, info.flags)
+                        rtspServerSink.writeSample(0, array, info.presentationTimeUs)
+
                         codec.releaseOutputBuffer(index, false)
+
+                        // write to mp4 log
+                        // if it's a keyframe, reconfigure the muxer.
+//                        if ((info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) > 0) {
+//                            muxer?.stop()
+//                            muxer?.release()
+//                            val sdcard = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+//                                getExternalFilesDir(Environment.DIRECTORY_RECORDINGS)
+//                            } else {
+//                                getExternalFilesDir(Environment.DIRECTORY_MOVIES)
+//                            }
+//                            val file = File(filesDir, "kinetic")
+//                            file.mkdirs()
+//                            val path = File(file, "$ntp.${config.fileExtension}")
+//                            muxer = MediaMuxer(path.absolutePath, config.container)
+//                            muxerVideoTrack = muxer?.addTrack(format)
+//                            muxer?.start()
+//                        }
+//                        muxer?.writeSampleData(muxerVideoTrack!!, ByteBuffer.wrap(array), info)
                     }
 
                     override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {

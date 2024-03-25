@@ -1,6 +1,7 @@
 package com.kevmo314.kineticstreamer
 
 import android.media.MediaFormat
+import android.media.MediaMuxer
 import android.os.Build
 import androidx.annotation.RequiresApi
 import androidx.datastore.core.DataStore
@@ -105,7 +106,7 @@ class Settings(private val dataStore: DataStore<Preferences>) {
     }
 
     suspend fun getStreamingConfiguration(): StreamingConfiguration {
-        val codec = codec.first().mimeType
-        return StreamingConfiguration(codec)
+//        val codec = codec.first().mimeType
+        return StreamingConfiguration(MediaFormat.MIMETYPE_VIDEO_VP8, MediaMuxer.OutputFormat.MUXER_OUTPUT_WEBM)
     }
 }
