@@ -3,6 +3,7 @@ package kinetic
 import (
 	"fmt"
 	"log"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,10 +33,12 @@ type RTSPServerSink struct {
 type rtspTrack struct {
 	sync.Mutex
 
-	media           *description.Media
-	packetizer      rtp.Packetizer
-	ptsMicroseconds int64
-	pts0            int64
+	media *description.Media
+
+	mtu, seq  uint16
+	payloader rtp.Payloader
+
+	pts0 int64
 }
 
 // called when a connection is opened.
@@ -105,7 +108,6 @@ func (sh *RTSPServerSink) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.R
 			StatusCode: base.StatusBadRequest,
 		}, err
 	}
-	t0 := time.Now()
 	var dpts int64
 	switch value := h.Value.(type) {
 	case *headers.RangeSMPTE:
@@ -134,48 +136,34 @@ func (sh *RTSPServerSink) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.R
 			return &base.Response{StatusCode: base.StatusInternalServerError}, err
 		}
 		go func(t *rtspTrack) {
-			var rpts0 int64
 			for sh.recordedPlaybackRequestId.Load() == requestId {
 				sample, err := reader.Next()
 				if err != nil {
 					return
 				}
 
-				if sample.PTS < requestedPTS {
-					// we cannot discard samples before the requested PTS because it contains
-					// the keyframe. instead, push the sample directly to the muxer with zero
-					// duration.
-					t.Lock()
-
-					packets := t.packetizer.Packetize(sample.Data, 1)
-					for _, p := range packets {
-						if err := sh.stream.WritePacketRTP(t.media, p); err != nil {
-							t.Unlock()
-							return
-						}
-					}
-
-					t.Unlock()
-				}
-
-				delta := time.Duration(sample.PTS-requestedPTS) * time.Microsecond
-				time.Sleep(time.Until(t0.Add(delta)))
-
 				t.Lock()
 
-				if rpts0 == 0 {
-					rpts0 = sample.PTS
-				}
-				duration := time.Duration(sample.PTS-rpts0) * time.Microsecond
-				rpts0 = sample.PTS
+				pts := time.Duration(sample.PTS) * time.Microsecond
+				ts := uint32(pts.Seconds() * float64(t.media.Formats[0].ClockRate()))
 
-				samples := uint32(duration.Seconds() * float64(t.media.Formats[0].ClockRate()))
-				packets := t.packetizer.Packetize(sample.Data, samples)
-				for _, p := range packets {
-					if err := sh.stream.WritePacketRTP(t.media, p); err != nil {
+				payloads := t.payloader.Payload(t.mtu-12, sample.Data)
+
+				for i, pp := range payloads {
+					if err := sh.stream.WritePacketRTP(t.media, &rtp.Packet{
+						Header: rtp.Header{
+							Version:        2,
+							Marker:         i == len(payloads)-1,
+							PayloadType:    t.media.Formats[0].PayloadType(),
+							SequenceNumber: t.seq,
+							Timestamp:      ts,
+						},
+						Payload: pp,
+					}); err != nil {
 						t.Unlock()
 						return
 					}
+					t.seq++
 				}
 
 				t.Unlock()
@@ -265,12 +253,25 @@ func toMediaAndPayloader(mediaFormatMimeType string, pt uint8) (*description.Med
 				PayloadTyp: pt,
 			}},
 		}, &codecs.AV1Payloader{}
+	case webrtc.MimeTypeOpus:
+		return &description.Media{
+			Type: description.MediaTypeAudio,
+			Formats: []format.Format{&format.Opus{
+				PayloadTyp: pt,
+			}},
+		}, &codecs.OpusPayloader{}
 	default:
 		return nil, nil
 	}
 }
 
 func NewRTSPServerSink(disk *DiskSink, encodedMediaFormatMimeTypes string) (*RTSPServerSink, error) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("panic: %s\n", debug.Stack())
+		}
+	}()
+	log.Printf("encodedMediaFormatMimeTypes: %s", encodedMediaFormatMimeTypes)
 	mediaFormatMimeTypes := strings.Split(encodedMediaFormatMimeTypes, ";")
 	s := &RTSPServerSink{
 		disk:   disk,
@@ -294,18 +295,16 @@ func NewRTSPServerSink(disk *DiskSink, encodedMediaFormatMimeTypes string) (*RTS
 	medias := make([]*description.Media, len(mediaFormatMimeTypes))
 	for i, mediaFormatMimeType := range mediaFormatMimeTypes {
 		media, payloader := toMediaAndPayloader(mediaFormatMimeType, uint8(i+96))
+		if media == nil || payloader == nil {
+			return nil, fmt.Errorf("invalid media format mime type: %s", mediaFormatMimeType)
+		}
 		s.tracks[i] = &rtspTrack{
-			media: media,
-			packetizer: rtp.NewPacketizer(
-				uint16(s.s.MaxPacketSize),
-				uint8(i+96),
-				0,
-				payloader,
-				rtp.NewRandomSequencer(),
-				uint32(media.Formats[0].ClockRate()),
-			),
+			media:     media,
+			payloader: payloader,
+			mtu:       uint16(s.s.MaxPacketSize),
 		}
 		medias[i] = media
+		log.Printf("media %d: %+v", i, media)
 	}
 
 	s.stream = gortsplib.NewServerStream(s.s, &description.Session{Medias: medias})
@@ -314,6 +313,11 @@ func NewRTSPServerSink(disk *DiskSink, encodedMediaFormatMimeTypes string) (*RTS
 }
 
 func (s *RTSPServerSink) WriteSample(i int, buf []byte, ptsMicroseconds int64) error {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("panic: %s\n", debug.Stack())
+		}
+	}()
 	if s.recordedPlaybackRequestId.Load() > 0 {
 		return nil
 	}
@@ -323,22 +327,29 @@ func (s *RTSPServerSink) WriteSample(i int, buf []byte, ptsMicroseconds int64) e
 	t.Lock()
 	defer t.Unlock()
 
-	if t.ptsMicroseconds == 0 {
-		t.ptsMicroseconds = ptsMicroseconds
+	if t.pts0 == 0 {
 		t.pts0 = ptsMicroseconds
 	}
-	duration := time.Duration(ptsMicroseconds-t.ptsMicroseconds) * time.Microsecond
-	t.ptsMicroseconds = ptsMicroseconds
 
-	samples := uint32(duration.Seconds() * float64(t.media.Formats[0].ClockRate()))
-	packets := t.packetizer.Packetize(buf, samples)
-	for _, p := range packets {
-		if err := s.stream.WritePacketRTP(t.media, p); err != nil {
-			return fmt.Errorf(
-				"t.stream.WritePacketRTP: %w",
-				err,
-			)
+	pts := time.Duration(ptsMicroseconds) * time.Microsecond
+	ts := uint32(pts.Seconds() * float64(t.media.Formats[0].ClockRate()))
+
+	payloads := t.payloader.Payload(t.mtu-12, buf)
+
+	for i, pp := range payloads {
+		if err := s.stream.WritePacketRTP(t.media, &rtp.Packet{
+			Header: rtp.Header{
+				Version:        2,
+				Marker:         i == len(payloads)-1,
+				PayloadType:    t.media.Formats[0].PayloadType(),
+				SequenceNumber: t.seq,
+				Timestamp:      ts,
+			},
+			Payload: pp,
+		}); err != nil {
+			return err
 		}
+		t.seq++
 	}
 	return nil
 }

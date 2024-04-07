@@ -67,7 +67,7 @@ func (t *DiskTrack) WriteSample(buf []byte, ptsMicroseconds int64, mediaCodecFla
 				return err
 			}
 		}
-		file, err := os.Create(fmt.Sprintf("%s/%d.bin", t.path, ptsMicroseconds))
+		file, err := os.Create(fmt.Sprintf("%s/%d.ucf", t.path, ptsMicroseconds))
 		if err != nil {
 			return err
 		}
@@ -78,7 +78,7 @@ func (t *DiskTrack) WriteSample(buf []byte, ptsMicroseconds int64, mediaCodecFla
 		header := make([]byte, 24)
 		binary.LittleEndian.PutUint32(header[0:4], uint32(mediaCodecFlags))
 		binary.LittleEndian.PutUint64(header[4:12], uint64(ptsMicroseconds))
-		binary.LittleEndian.PutUint64(header[12:20], uint64(ntp.UnixNano()/1000))
+		binary.LittleEndian.PutUint64(header[12:20], uint64(ntp.UnixNano()))
 		binary.LittleEndian.PutUint32(header[20:24], uint32(len(buf)))
 
 		if _, err := t.file.Write(header); err != nil {

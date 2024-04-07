@@ -34,15 +34,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
-import androidx.datastore.preferences.core.intPreferencesKey
-import androidx.datastore.preferences.core.stringPreferencesKey
 import kotlinx.coroutines.runBlocking
 
 @ExperimentalMaterial3Api
 @Composable
 fun CodecRadioButton(
-    selectedCodec: SupportedCodec?,
-    codec: SupportedCodec,
+    selectedCodec: SupportedVideoCodec?,
+    codec: SupportedVideoCodec,
     onClick: () -> Unit,
 ) {
     Surface(onClick = onClick) {
@@ -155,30 +153,30 @@ fun SettingsScreen(
 
             val codec = settings.codec.collectAsState(initial = null)
 
-            CodecRadioButton(codec.value, SupportedCodec.H264) {
+            CodecRadioButton(codec.value, SupportedVideoCodec.H264) {
                 runBlocking {
-                    settings.setCodec(SupportedCodec.H264)
+                    settings.setCodec(SupportedVideoCodec.H264)
                 }
             }
-            CodecRadioButton(codec.value, SupportedCodec.H265) {
+            CodecRadioButton(codec.value, SupportedVideoCodec.H265) {
                 runBlocking {
-                    settings.setCodec(SupportedCodec.H265)
+                    settings.setCodec(SupportedVideoCodec.H265)
                 }
             }
-            CodecRadioButton(codec.value, SupportedCodec.VP8) {
+            CodecRadioButton(codec.value, SupportedVideoCodec.VP8) {
                 runBlocking {
-                    settings.setCodec(SupportedCodec.VP8)
+                    settings.setCodec(SupportedVideoCodec.VP8)
                 }
             }
-            CodecRadioButton(codec.value, SupportedCodec.VP9) {
+            CodecRadioButton(codec.value, SupportedVideoCodec.VP9) {
                 runBlocking {
-                    settings.setCodec(SupportedCodec.VP9)
+                    settings.setCodec(SupportedVideoCodec.VP9)
                 }
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                CodecRadioButton(codec.value, SupportedCodec.AV1) {
+                CodecRadioButton(codec.value, SupportedVideoCodec.AV1) {
                     runBlocking {
-                        settings.setCodec(SupportedCodec.AV1)
+                        settings.setCodec(SupportedVideoCodec.AV1)
                     }
 
                 }

@@ -18,6 +18,8 @@ const (
 	MediaFormatMimeTypeVideoAV1  MediaFormatMimeType = "video/av01"
 	MediaFormatMimeTypeVideoH264 MediaFormatMimeType = "video/avc"
 	MediaFormatMimeTypeVideoH265 MediaFormatMimeType = "video/hevc"
+	MediaFormatMimeTypeAudioAAC  MediaFormatMimeType = "audio/aac"
+	MediaFormatMimeTypeAudioOPUS MediaFormatMimeType = "audio/opus"
 )
 
 func (t MediaFormatMimeType) PionMimeType() string {
@@ -32,6 +34,10 @@ func (t MediaFormatMimeType) PionMimeType() string {
 		return webrtc.MimeTypeH264
 	case MediaFormatMimeTypeVideoH265:
 		return webrtc.MimeTypeH265
+	case MediaFormatMimeTypeAudioAAC:
+		return "audio/aac"
+	case MediaFormatMimeTypeAudioOPUS:
+		return webrtc.MimeTypeOpus
 	default:
 		panic(fmt.Sprintf("unknown media format mime type: %s", t))
 	}

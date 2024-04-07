@@ -10,12 +10,11 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlin.math.ln
 import kotlin.math.pow
 
-enum class SupportedCodec(val mimeType: String) {
+enum class SupportedVideoCodec(val mimeType: String) {
     H264(MediaFormat.MIMETYPE_VIDEO_AVC),
     H265(MediaFormat.MIMETYPE_VIDEO_HEVC),
     VP8(MediaFormat.MIMETYPE_VIDEO_VP8),
@@ -23,6 +22,12 @@ enum class SupportedCodec(val mimeType: String) {
     @RequiresApi(Build.VERSION_CODES.Q)
     AV1(MediaFormat.MIMETYPE_VIDEO_AV1);
 }
+
+enum class SupportedAudioCodec(val mimeType: String) {
+    AAC(MediaFormat.MIMETYPE_AUDIO_AAC),
+    OPUS(MediaFormat.MIMETYPE_AUDIO_OPUS);
+}
+
 
 fun bytesToString(bytes: Long): String {
     val unit = 1024
@@ -65,9 +70,9 @@ class Settings(private val dataStore: DataStore<Preferences>) {
     private val _recordingMaxCapacityBytes = longPreferencesKey("recording_max_capacity_bytes")
 
     val codec = dataStore.data
-         .map { SupportedCodec.valueOf(it[_codec] ?: SupportedCodec.H264.name) }
+         .map { SupportedVideoCodec.valueOf(it[_codec] ?: SupportedVideoCodec.H264.name) }
 
-    suspend fun setCodec(codec: SupportedCodec) {
+    suspend fun setCodec(codec: SupportedVideoCodec) {
         dataStore.edit { it[_codec] = codec.name }
     }
 
@@ -107,6 +112,10 @@ class Settings(private val dataStore: DataStore<Preferences>) {
 
     suspend fun getStreamingConfiguration(): StreamingConfiguration {
 //        val codec = codec.first().mimeType
-        return StreamingConfiguration(MediaFormat.MIMETYPE_VIDEO_VP8, MediaMuxer.OutputFormat.MUXER_OUTPUT_WEBM)
+        return StreamingConfiguration(
+            MediaFormat.MIMETYPE_VIDEO_VP8,
+            MediaFormat.MIMETYPE_AUDIO_OPUS,
+            MediaMuxer.OutputFormat.MUXER_OUTPUT_WEBM
+        )
     }
 }

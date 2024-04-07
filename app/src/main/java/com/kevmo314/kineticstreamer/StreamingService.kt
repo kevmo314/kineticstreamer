@@ -1,11 +1,16 @@
 package com.kevmo314.kineticstreamer
 
+import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.hardware.camera2.CameraManager
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.AudioTimestamp
 import android.media.MediaCodec
 import android.media.MediaCodecList
 import android.media.MediaFormat
@@ -14,6 +19,7 @@ import android.os.HandlerThread
 import android.os.IBinder
 import android.util.Log
 import android.view.Surface
+import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import kinetic.RTSPServerSink
 import kinetic.DiskSink
@@ -21,37 +27,38 @@ import java.io.File
 
 
 class StreamingService : Service() {
-    private val handlerThread by lazy {
-        HandlerThread("StreamingService").apply {
-            start()
-        }
-    }
+    private var videoSource: VideoSource? = null
+    private var audioSource: AudioRecord? = null
 
-    private val handler by lazy {
-        Handler(handlerThread.looper)
-    }
+    private var videoEncoderInputSurface: Surface? = null
+    private var videoEncoder: MediaCodec? = null
+
+    private var audioEncoder: MediaCodec? = null
 
     private val binder = object : IStreamingService.Stub() {
         override fun setPreviewSurface(surface: Surface?) {
             Log.i("StreamingService", "setPreviewSurface")
 
-            cameraSource?.setPreviewSurface(surface)
+            videoSource?.setPreviewSurface(surface)
         }
 
         override fun startStreaming(config: StreamingConfiguration) {
-            val format = config.toMediaFormat()
-            val codecName = MediaCodecList(MediaCodecList.REGULAR_CODECS).findEncoderForFormat(format)
-            encoder = MediaCodec.createByCodecName(codecName).apply {
-                configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            val videoMediaFormat = config.videoMediaFormat
+            val audioMediaFormat = config.audioMediaFormat
 
-                Log.i("StreamingService", "Encoder callback")
+            val diskSink = DiskSink(
+                filesDir.absolutePath + File.separator + "kinetic", "video;audio")
+            val rtspServerSink = RTSPServerSink(
+                diskSink,
+                listOf(videoMediaFormat.getString(MediaFormat.KEY_MIME), audioMediaFormat.getString(MediaFormat.KEY_MIME))
+                    .joinToString(";"))
+
+            videoEncoder = MediaCodec.createByCodecName(
+                MediaCodecList(MediaCodecList.REGULAR_CODECS).findEncoderForFormat(videoMediaFormat)
+            ).apply {
+                configure(videoMediaFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
 
                 setCallback(object : MediaCodec.Callback() {
-                    var diskSink = DiskSink(filesDir.absolutePath + File.separator + "kinetic",
-                        "video")
-                    var rtspServerSink = RTSPServerSink(diskSink, format.getString(MediaFormat.KEY_MIME))
-//                     var sink = WHIPSink("https://whip.vdo.ninja/asdasdf", "asdasdf")
-
                     override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {
                         Log.i("StreamingService", "Encoder input buffer available")
                     }
@@ -69,25 +76,6 @@ class StreamingService : Service() {
                         rtspServerSink.writeSample(0, array, info.presentationTimeUs)
 
                         codec.releaseOutputBuffer(index, false)
-
-                        // write to mp4 log
-                        // if it's a keyframe, reconfigure the muxer.
-//                        if ((info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) > 0) {
-//                            muxer?.stop()
-//                            muxer?.release()
-//                            val sdcard = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-//                                getExternalFilesDir(Environment.DIRECTORY_RECORDINGS)
-//                            } else {
-//                                getExternalFilesDir(Environment.DIRECTORY_MOVIES)
-//                            }
-//                            val file = File(filesDir, "kinetic")
-//                            file.mkdirs()
-//                            val path = File(file, "$ntp.${config.fileExtension}")
-//                            muxer = MediaMuxer(path.absolutePath, config.container)
-//                            muxerVideoTrack = muxer?.addTrack(format)
-//                            muxer?.start()
-//                        }
-//                        muxer?.writeSampleData(muxerVideoTrack!!, ByteBuffer.wrap(array), info)
                     }
 
                     override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
@@ -97,39 +85,118 @@ class StreamingService : Service() {
                     override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
                         Log.i("StreamingService", "Encoder output format changed: $format")
                     }
-                }, handler)
+                }, Handler(HandlerThread("StreamingService").apply { start() }.looper))
             }
-            encoderInputSurface = encoder?.createInputSurface()
-            encoder?.start()
-            cameraSource?.setEncoderInputSurface(encoderInputSurface)
+            videoEncoderInputSurface = videoEncoder?.createInputSurface()
+
+            if (ActivityCompat.checkSelfPermission(applicationContext, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                return
+            }
+            audioSource = AudioRecord(
+                0, 48000, 2, AudioFormat.ENCODING_PCM_16BIT, 1024 * 1024
+            )
+
+            audioSource?.let {
+                audioMediaFormat.setInteger(MediaFormat.KEY_CHANNEL_COUNT, it.channelCount)
+                audioMediaFormat.setInteger(MediaFormat.KEY_SAMPLE_RATE, it.sampleRate)
+                audioMediaFormat.setInteger(MediaFormat.KEY_CHANNEL_MASK, it.channelConfiguration)
+                audioMediaFormat.setInteger(MediaFormat.KEY_PCM_ENCODING, it.audioFormat)
+                audioMediaFormat.setInteger(MediaFormat.KEY_AUDIO_SESSION_ID, it.audioSessionId)
+            }
+
+            audioEncoder = MediaCodec.createByCodecName(
+                MediaCodecList(MediaCodecList.REGULAR_CODECS).findEncoderForFormat(audioMediaFormat)
+            ).apply {
+                configure(audioMediaFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+
+                val timestamp = AudioTimestamp()
+
+                setCallback(object : MediaCodec.Callback() {
+                    override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {
+                        val buffer = codec.getInputBuffer(index) ?: return
+                        when (val n = audioSource?.read(buffer, buffer.capacity(), AudioRecord.READ_NON_BLOCKING)) {
+                            AudioRecord.ERROR_INVALID_OPERATION -> {
+                                Log.e("StreamingService", "Audio source read error")
+                            }
+                            AudioRecord.ERROR_BAD_VALUE -> {
+                                Log.e("StreamingService", "Audio source read error")
+                            }
+                            AudioRecord.ERROR_DEAD_OBJECT -> {
+                                Log.e("StreamingService", "Audio source read error")
+                            }
+                            AudioRecord.ERROR, null -> {
+                                Log.e("StreamingService", "Audio source read error")
+                            }
+                            else -> {
+                                var pts = System.nanoTime()
+                                // try to get a higher-precision timestamp
+                                when (audioSource?.getTimestamp(timestamp, AudioTimestamp.TIMEBASE_MONOTONIC)) {
+                                    AudioRecord.SUCCESS -> {
+                                        pts = timestamp.nanoTime
+                                    }
+                                }
+                                codec.queueInputBuffer(index, 0, n, pts, 0)
+                            }
+                        }
+                    }
+
+                    override fun onOutputBufferAvailable(
+                        codec: MediaCodec,
+                        index: Int,
+                        info: MediaCodec.BufferInfo
+                    ) {
+                        val buffer = codec.getOutputBuffer(index) ?: return
+                        val array = ByteArray(info.size)
+                        buffer.get(array, info.offset, info.size)
+
+                        diskSink.track(1).writeSample(array, info.presentationTimeUs, info.flags)
+                        rtspServerSink.writeSample(1, array, info.presentationTimeUs)
+
+                        codec.releaseOutputBuffer(index, false)
+                    }
+
+                    override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
+                        Log.e("StreamingService", "Encoder error: $e")
+                    }
+
+                    override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
+                        Log.i("StreamingService", "Encoder output format changed: $format")
+                    }
+                }, Handler(HandlerThread("StreamingService").apply { start() }.looper))
+            }
+
+            videoEncoder?.start()
+            videoSource?.setEncoderInputSurface(videoEncoderInputSurface)
+
+            audioEncoder?.start()
+            audioSource?.startRecording()
         }
 
         override fun stopStreaming() {
-            cameraSource?.setEncoderInputSurface(null)
-            encoder?.stop()
-            encoderInputSurface?.release()
-            encoderInputSurface = null
-            encoder?.release()
-            encoder = null
+            videoSource?.setEncoderInputSurface(null)
+            videoEncoder?.stop()
+            videoEncoderInputSurface?.release()
+            videoEncoderInputSurface = null
+            videoEncoder?.release()
+            videoEncoder = null
+
+            audioSource?.stop()
+            audioSource?.release()
+            audioSource = null
         }
 
         override fun isStreaming(): Boolean {
-            return encoderInputSurface != null
+            return videoEncoderInputSurface != null
         }
 
         override fun getActiveCameraId(): String? {
-            return cameraSource?.getActiveCameraId()
+            return videoSource?.getActiveCameraId()
         }
 
         override fun setActiveCameraId(cameraId: String?) {
-            cameraId?.let { cameraSource?.setActiveCameraId(it) }
+            cameraId?.let { videoSource?.setActiveCameraId(it) }
         }
     }
-
-    private var cameraSource: CameraSource? = null
-
-    private var encoderInputSurface: Surface? = null
-    private var encoder: MediaCodec? = null
 
     override fun onCreate() {
         val channel = NotificationChannel(
@@ -156,13 +223,13 @@ class StreamingService : Service() {
                 .build()
         )
 
-        cameraSource = CameraSource(this, getSystemService(Context.CAMERA_SERVICE) as CameraManager)
+        videoSource = VideoSource(this, getSystemService(Context.CAMERA_SERVICE) as CameraManager)
     }
 
     override fun onDestroy() {
         super.onDestroy()
 
-        cameraSource?.close()
+        videoSource?.close()
     }
 
     override fun onStartCommand(intent: Intent, flags: Int, startId: Int): Int {
