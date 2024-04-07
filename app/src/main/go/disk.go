@@ -47,17 +47,6 @@ type DiskTrack struct {
 	file *os.File
 }
 
-type MediaCodecBufferFlag int32
-
-const (
-	MediaCodecBufferFlagKeyFrame     MediaCodecBufferFlag = 1
-	MediaCodecBufferFlagCodecConfig  MediaCodecBufferFlag = 2
-	MediaCodecBufferFlagEndOfStream  MediaCodecBufferFlag = 4
-	MediaCodecBufferFlagPartialFrame MediaCodecBufferFlag = 8
-	MediaCodecBufferFlagMuxerData    MediaCodecBufferFlag = 16
-	MediaCodecBufferFlagDecodeOnly   MediaCodecBufferFlag = 32
-)
-
 func (t *DiskTrack) WriteSample(buf []byte, ptsMicroseconds int64, mediaCodecFlags int32) error {
 	ntp := time.Now()
 	// if it's a keyframe, create a new file based on the pts.
