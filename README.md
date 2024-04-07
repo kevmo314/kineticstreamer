@@ -19,3 +19,4 @@ Kinetic Streamer is a mobile app that turns your phone into an RTSP camera.
 - [ ] WebView overlays
 - [ ] GPS data
 - [ ] iOS support
+- [ ] Continuous nomination support
