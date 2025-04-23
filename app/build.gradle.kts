@@ -19,6 +19,14 @@ android {
         vectorDrawables {
             useSupportLibrary = true
         }
+        
+        // Configure native build ABIs
+        ndk {
+            abiFilters.add("armeabi-v7a")
+            abiFilters.add("arm64-v8a")
+            abiFilters.add("x86")
+            abiFilters.add("x86_64")
+        }
     }
 
     buildTypes {
@@ -31,22 +39,26 @@ android {
         }
     }
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions {
-        jvmTarget = "1.8"
+        jvmTarget = "17"
     }
     buildFeatures {
         compose = true
         aidl = true
     }
     composeOptions {
-        kotlinCompilerExtensionVersion = "1.4.3"
+        kotlinCompilerExtensionVersion = "1.5.11"
     }
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+        // Don't strip native libraries during APK build
+        jniLibs {
+            keepDebugSymbols += "**/*.so"
         }
     }
     externalNativeBuild {
@@ -54,6 +66,42 @@ android {
             path = file("src/main/jni/CMakeLists.txt")
             version = "3.22.1"
         }
+    }
+}
+
+// Create a custom task to build the Go library
+tasks.register<Exec>("buildGoLibrary") {
+    // Use a task output directory for the Go AAR
+    val libDir = layout.buildDirectory.dir("go-lib").get().asFile
+    mkdir(libDir)
+    
+    workingDir = file("src/main/go")
+    commandLine("./build.sh", libDir.absolutePath)
+    
+    doLast {
+        // Create the libs directory if it doesn't exist
+        mkdir("src/main/libs")
+        
+        // Copy the AAR to the libs directory
+        copy {
+            from(libDir)
+            include("*.aar")
+            into("src/main/libs")
+        }
+        println("Built and copied Go AAR to src/main/libs")
+    }
+}
+
+// Run buildGoLibrary after the native libraries are built
+// Make the mergeDebugJniLibFolders task depend on buildGoLibrary
+afterEvaluate {
+    tasks.named("mergeDebugJniLibFolders").configure {
+        dependsOn("buildGoLibrary")
+    }
+    
+    // Make buildGoLibrary depend on the C++ build
+    tasks.named("buildGoLibrary").configure {
+        dependsOn("externalNativeBuildDebug")
     }
 }
 
@@ -75,7 +123,7 @@ dependencies {
 
     implementation("androidx.navigation:navigation-compose:2.7.7")
 
-    implementation(platform("androidx.compose:compose-bom:2023.03.00"))
+    implementation(platform("androidx.compose:compose-bom:2024.04.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
@@ -83,14 +131,17 @@ dependencies {
     implementation("androidx.compose.material:material-icons-core")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("com.google.accompanist:accompanist-permissions:0.32.0")
+    
+    // Include AAR files from src/main/libs directory
     implementation(fileTree(mapOf(
-        "dir" to "src/main/go",
+        "dir" to "src/main/libs",
         "include" to listOf("*.aar", "*.jar"),
     )))
+    
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
-    androidTestImplementation(platform("androidx.compose:compose-bom:2023.03.00"))
+    androidTestImplementation(platform("androidx.compose:compose-bom:2024.04.00"))
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")

@@ -13,7 +13,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.Divider
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -129,8 +129,9 @@ fun SettingsScreen(
             ) {
                 TextField(value = url, onValueChange = setUrl, label = { Text("URL") },
                     modifier = Modifier.weight(1f),
-                    colors = TextFieldDefaults.textFieldColors(
-                        containerColor = Color.Transparent,
+                    colors = TextFieldDefaults.colors(
+                        unfocusedContainerColor = Color.Transparent,
+                        focusedContainerColor = Color.Transparent,
                     ),
                 )
                 IconButton(onClick = {
@@ -147,7 +148,7 @@ fun SettingsScreen(
                     )
                 }
             }
-            Divider()
+            HorizontalDivider()
 
             Text("Codec", modifier = Modifier.padding(16.dp))
 
@@ -183,8 +184,8 @@ fun SettingsScreen(
             }
             Surface(onClick = { /*TODO*/ }) {
                 ListItem(
-                    headlineText = { Text("Bitrate") },
-                    supportingText = { Text("Adaptive bitrate") },
+                    headlineContent = { Text("Bitrate") },
+                    supportingContent = { Text("Adaptive bitrate") },
                     modifier = Modifier.fillMaxWidth()
                 )
             }
@@ -192,7 +193,7 @@ fun SettingsScreen(
                 navigateTo("settings/recording")
             }) {
                 ListItem(
-                    headlineText = { Text("Recording settings") },
+                    headlineContent = { Text("Recording settings") },
                     modifier = Modifier.fillMaxWidth()
                 )
             }
@@ -234,8 +235,8 @@ fun RecordingSettingsScreen(
         ) {
             Surface(onClick = { /*TODO*/ }) {
                 ListItem(
-                    headlineText = { Text("Container") },
-                    supportingText = { Text("MP4") },
+                    headlineContent = { Text("Container") },
+                    supportingContent = { Text("MP4") },
                     modifier = Modifier.fillMaxWidth()
                 )
             }
@@ -244,8 +245,8 @@ fun RecordingSettingsScreen(
 
             Surface(onClick = { /*TODO*/ }) {
                 ListItem(
-                    headlineText = { Text("Maximum capacity") },
-                    supportingText = { Text(bytesToString(maxCapacity.value)) },
+                    headlineContent = { Text("Maximum capacity") },
+                    supportingContent = { Text(bytesToString(maxCapacity.value)) },
                     modifier = Modifier.fillMaxWidth()
                 )
             }

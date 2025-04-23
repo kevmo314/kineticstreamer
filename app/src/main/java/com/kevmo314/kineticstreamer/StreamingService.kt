@@ -35,6 +35,16 @@ class StreamingService : Service() {
 
     private var audioEncoder: MediaCodec? = null
 
+    // Native methods
+    private external fun initNativeLibraries(): Int
+
+    // Load the native library
+    companion object {
+        init {
+            System.loadLibrary("kinetic")
+        }
+    }
+
     private val binder = object : IStreamingService.Stub() {
         override fun setPreviewSurface(surface: Surface?) {
             Log.i("StreamingService", "setPreviewSurface")
@@ -222,6 +232,18 @@ class StreamingService : Service() {
                 .setChannelId("KINETIC_STREAMER")
                 .build()
         )
+
+        // Initialize native libraries
+        try {
+            val result = initNativeLibraries()
+            if (result != 0) {
+                Log.e("StreamingService", "Failed to initialize native libraries: $result")
+            } else {
+                Log.i("StreamingService", "Native libraries initialized successfully")
+            }
+        } catch (e: Exception) {
+            Log.e("StreamingService", "Error initializing native libraries", e)
+        }
 
         videoSource = VideoSource(this, getSystemService(Context.CAMERA_SERVICE) as CameraManager)
     }
