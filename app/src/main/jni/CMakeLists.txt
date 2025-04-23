@@ -59,7 +59,7 @@ ExternalProject_Add(mbedtls
 ExternalProject_Add(srt
         GIT_REPOSITORY "https://github.com/Haivision/srt.git"
         GIT_TAG "v1.5.4"
-        CMAKE_ARGS  ${ANDROID_CMAKE_ARGS}
+        CMAKE_ARGS ${ANDROID_CMAKE_ARGS}
             -DENABLE_APPS=OFF
             -DENABLE_LOGGING=ON
             -DENABLE_STDCXX_SYNC=ON
@@ -71,7 +71,7 @@ ExternalProject_Add(srt
             -DMBEDTLS_LIBRARIES=${CMAKE_BINARY_DIR}/lib/libmbedx509.so
             -DMBEDTLS_LIBRARIES=${CMAKE_BINARY_DIR}/lib/libmbedcrypto.so
         DEPENDS mbedtls
-        BUILD_BYPRODUCTS ${SRT_BUILD_DIR}/lib/libsrt.so
+        BUILD_BYPRODUCTS ${CMAKE_BINARY_DIR}/lib/libsrt.so
 )
 
 # Setup native library 
@@ -87,4 +87,8 @@ target_link_libraries(kinetic
     ${CMAKE_BINARY_DIR}/lib/libusb-1.0.so 
     ${CMAKE_BINARY_DIR}/lib/libuvc.so
     ${CMAKE_BINARY_DIR}/lib/libjpeg.so
+    ${CMAKE_BINARY_DIR}/lib/libmbedtls.so
+    ${CMAKE_BINARY_DIR}/lib/libmbedx509.so
+    ${CMAKE_BINARY_DIR}/lib/libmbedcrypto.so
+    ${CMAKE_BINARY_DIR}/lib/libsrt.so
 )
