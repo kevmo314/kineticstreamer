@@ -6,11 +6,13 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/kevmo314/kinetic/pkg/androidnet"
 	"github.com/pion/interceptor"
+	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 )
@@ -21,8 +23,10 @@ type WHIPSink struct {
 }
 
 type whipTrack struct {
-	track           *webrtc.TrackLocalStaticSample
-	ptsMicroseconds int64
+	track            *webrtc.TrackLocalStaticSample
+	ptsMicroseconds  int64
+	keyframeRequested bool
+	mu               sync.Mutex
 }
 
 func NewWHIPSink(url, bearerToken, encodedMediaFormatMimeTypes string) (*WHIPSink, error) {
@@ -37,6 +41,7 @@ func NewWHIPSink(url, bearerToken, encodedMediaFormatMimeTypes string) (*WHIPSin
 	settingEngine := webrtc.SettingEngine{}
 
 	settingEngine.SetNet(net)
+	settingEngine.SetICERenomination()
 
 	m := &webrtc.MediaEngine{}
 	if err := m.RegisterDefaultCodecs(); err != nil {
@@ -68,19 +73,29 @@ func NewWHIPSink(url, bearerToken, encodedMediaFormatMimeTypes string) (*WHIPSin
 		if err != nil {
 			return nil, err
 		}
-		tracks[i] = &whipTrack{track: track, ptsMicroseconds: 0}
+		t := &whipTrack{track: track, ptsMicroseconds: 0}
+		tracks[i] = t
 		rtpSender, err := peerConnection.AddTrack(track)
 		if err != nil {
 			return nil, err
 		}
-		go func() {
-			rtcpBuf := make([]byte, 1500)
+		go func(trackIdx int, wt *whipTrack) {
 			for {
-				if _, _, err := rtpSender.Read(rtcpBuf); err != nil {
+				packets, _, err := rtpSender.ReadRTCP()
+				if err != nil {
 					return
 				}
+				for _, pkt := range packets {
+					switch pkt.(type) {
+					case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
+						log.Printf("PLI/FIR received for track %d", trackIdx)
+						wt.mu.Lock()
+						wt.keyframeRequested = true
+						wt.mu.Unlock()
+					}
+				}
 			}
-		}()
+		}(i, t)
 	}
 
 	offer, err := peerConnection.CreateOffer(nil)
@@ -120,15 +135,21 @@ func NewWHIPSink(url, bearerToken, encodedMediaFormatMimeTypes string) (*WHIPSin
 	return &WHIPSink{tracks: tracks, pc: peerConnection}, nil
 }
 
-func (s *WHIPSink) WriteSample(i int, buf []byte, ptsMicroseconds int64) error {
+func (s *WHIPSink) WriteSample(i int, buf []byte, ptsMicroseconds int64) (bool, error) {
 	t := s.tracks[i]
+
+	// Check and reset keyframe request
+	t.mu.Lock()
+	keyframeRequested := t.keyframeRequested
+	t.keyframeRequested = false
+	t.mu.Unlock()
 
 	if t.ptsMicroseconds == 0 {
 		t.ptsMicroseconds = ptsMicroseconds
 	}
 	duration := time.Duration(ptsMicroseconds-t.ptsMicroseconds) * time.Microsecond
 	t.ptsMicroseconds = ptsMicroseconds
-	return t.track.WriteSample(media.Sample{Data: buf, Duration: duration})
+	return keyframeRequested, t.track.WriteSample(media.Sample{Data: buf, Duration: duration})
 }
 
 func (s *WHIPSink) Close() error {

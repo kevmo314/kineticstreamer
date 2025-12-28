@@ -2,18 +2,20 @@ package com.kevmo314.kineticstreamer
 
 import android.Manifest
 import android.content.ComponentName
+import android.util.Log
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.os.Build
 import android.os.IBinder
-import android.util.Log
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.ViewGroup
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeGesturesPadding
 import androidx.compose.foundation.layout.size
@@ -42,8 +44,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.runInterruptible
 
 val REQUIRED_PERMISSIONS =
     mutableListOf(
@@ -165,20 +167,38 @@ fun MainScreen(
                             cameraSelectorDialogOpen.value = true
                         },
                     ) {
-                        Icon(
-                            Icons.Filled.Cameraswitch,
-                            contentDescription = "Switch camera",
-                            modifier = Modifier.fillMaxSize(),
-                            tint = Color.White,
-                        )
+                        Box(modifier = Modifier.fillMaxSize()) {
+                            Icon(
+                                Icons.Filled.Cameraswitch,
+                                contentDescription = null,
+                                modifier = Modifier.fillMaxSize().offset(1.dp, 1.dp),
+                                tint = Color.Black.copy(alpha = 0.5f),
+                            )
+                            Icon(
+                                Icons.Filled.Cameraswitch,
+                                contentDescription = "Switch camera",
+                                modifier = Modifier.fillMaxSize(),
+                                tint = Color.White,
+                            )
+                        }
                     }
                     Button(
                         onClick = {
                             if (isStreaming.value) {
+                                Log.i("MainScreen", "Stopping streaming")
                                 stub.stopStreaming()
+                                isStreaming.value = false
                             } else {
                                 runBlocking {
-                                    stub.startStreaming(settings.getStreamingConfiguration())
+                                    val streamingConfig = settings.getStreamingConfiguration()
+                                    val outputConfigs = settings.outputConfigurations.first()
+                                    val outputConfigsJson = OutputConfiguration.listToJSON(outputConfigs)
+                                    Log.i("MainScreen", "Starting streaming with config: $outputConfigsJson")
+                                    val error = stub.startStreaming(streamingConfig, outputConfigsJson)
+                                    if (error != null) {
+                                        Log.e("MainScreen", "Streaming error: $error")
+                                    }
+                                    isStreaming.value = true
                                 }
                             }
                         },
@@ -197,12 +217,20 @@ fun MainScreen(
                             navigateToSettings()
                         },
                     ) {
-                        Icon(
-                            Icons.Filled.Settings,
-                            contentDescription = "Settings",
-                            modifier = Modifier.fillMaxSize(),
-                            tint = Color.White,
-                        )
+                        Box(modifier = Modifier.fillMaxSize()) {
+                            Icon(
+                                Icons.Filled.Settings,
+                                contentDescription = null,
+                                modifier = Modifier.fillMaxSize().offset(1.dp, 1.dp),
+                                tint = Color.Black.copy(alpha = 0.5f),
+                            )
+                            Icon(
+                                Icons.Filled.Settings,
+                                contentDescription = "Settings",
+                                modifier = Modifier.fillMaxSize(),
+                                tint = Color.White,
+                            )
+                        }
                     }
                 }
 

@@ -23,8 +23,6 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextField
-import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -32,7 +30,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.runBlocking
 
@@ -88,7 +85,18 @@ fun SettingsScreen(
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
         ) {
-            Text("Outputs", modifier = Modifier.padding(16.dp))
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp)
+            ) {
+                Text("Outputs", modifier = Modifier.weight(1f))
+                IconButton(onClick = { navigateTo("settings/output/add") }) {
+                    Icon(
+                        imageVector = Icons.Filled.Add,
+                        contentDescription = "Add output"
+                    )
+                }
+            }
 
             val outputConfigurations = settings.outputConfigurations.collectAsState(initial = emptyList())
 
@@ -96,7 +104,7 @@ fun SettingsScreen(
                 Surface(onClick = {
                     runBlocking {
                         val updatedConfigurations = outputConfigurations.value.toMutableList()
-                        updatedConfigurations[index] = outputConfiguration.copy(enabled = !outputConfiguration.enabled)
+                        updatedConfigurations[index] = outputConfiguration.withEnabled(!outputConfiguration.enabled)
                         settings.setOutputConfigurations(updatedConfigurations)
                     }
                 }) {
@@ -107,47 +115,18 @@ fun SettingsScreen(
                         Checkbox(checked = outputConfiguration.enabled, onCheckedChange = {
                             runBlocking {
                                 val updatedConfigurations = outputConfigurations.value.toMutableList()
-                                updatedConfigurations[index] = outputConfiguration.copy(enabled = !outputConfiguration.enabled)
+                                updatedConfigurations[index] = outputConfiguration.withEnabled(!outputConfiguration.enabled)
                                 settings.setOutputConfigurations(updatedConfigurations)
                             }
                         })
                         Column {
                             Text(outputConfiguration.protocol)
-                            Text(outputConfiguration.url)
+                            Text(outputConfiguration.displayName)
                         }
                     }
                 }
             }
 
-            val (url, setUrl) = remember { mutableStateOf("") }
-
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(8.dp)
-            ) {
-                TextField(value = url, onValueChange = setUrl, label = { Text("URL") },
-                    modifier = Modifier.weight(1f),
-                    colors = TextFieldDefaults.colors(
-                        unfocusedContainerColor = Color.Transparent,
-                        focusedContainerColor = Color.Transparent,
-                    ),
-                )
-                IconButton(onClick = {
-                    runBlocking {
-                        val updatedConfigurations = outputConfigurations.value.toMutableList()
-                        updatedConfigurations.add(OutputConfiguration(url, true))
-                        settings.setOutputConfigurations(updatedConfigurations)
-                        setUrl("")
-                    }
-                }) {
-                    Icon(
-                        imageVector = Icons.Filled.Add,
-                        contentDescription = "Add output"
-                    )
-                }
-            }
             HorizontalDivider()
 
             Text("Codec", modifier = Modifier.padding(16.dp))

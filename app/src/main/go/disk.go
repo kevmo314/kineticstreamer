@@ -41,6 +41,28 @@ func (s *DiskSink) Track(i int) *DiskTrack {
 	return s.tracks[i]
 }
 
+// WriteSample implements the Sink interface
+func (s *DiskSink) WriteSample(trackIndex int, buf []byte, ptsMicroseconds int64) (bool, error) {
+	if trackIndex < 0 || trackIndex >= len(s.tracks) {
+		return false, fmt.Errorf("track index out of range: %d", trackIndex)
+	}
+	// Use 0 for flags since the Sink interface doesn't provide them
+	return false, s.tracks[trackIndex].WriteSample(buf, ptsMicroseconds, 0)
+}
+
+// Close implements the Sink interface
+func (s *DiskSink) Close() error {
+	for _, track := range s.tracks {
+		if track.file != nil {
+			if err := track.file.Close(); err != nil {
+				return err
+			}
+			track.file = nil
+		}
+	}
+	return nil
+}
+
 type DiskTrack struct {
 	path string
 

@@ -312,14 +312,14 @@ func NewRTSPServerSink(disk *DiskSink, encodedMediaFormatMimeTypes string) (*RTS
 	return s, nil
 }
 
-func (s *RTSPServerSink) WriteSample(i int, buf []byte, ptsMicroseconds int64) error {
+func (s *RTSPServerSink) WriteSample(i int, buf []byte, ptsMicroseconds int64) (bool, error) {
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Printf("panic: %s\n", debug.Stack())
 		}
 	}()
 	if s.recordedPlaybackRequestId.Load() > 0 {
-		return nil
+		return false, nil
 	}
 
 	t := s.tracks[i]
@@ -347,11 +347,11 @@ func (s *RTSPServerSink) WriteSample(i int, buf []byte, ptsMicroseconds int64) e
 			},
 			Payload: pp,
 		}); err != nil {
-			return err
+			return false, err
 		}
 		t.seq++
 	}
-	return nil
+	return false, nil
 }
 
 func (s *RTSPServerSink) Close() error {

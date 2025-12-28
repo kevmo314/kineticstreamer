@@ -265,18 +265,18 @@ func NewSRTSink(s, encodedMediaFormatMimeTypes string) (*SRTSink, error) {
 	return &SRTSink{mpw: mpegts.NewWriter(sck, tracks), sck: sck, tracks: tracks}, nil
 }
 
-func (s *SRTSink) WriteSample(i int, buf []byte, ptsMicroseconds int64) error {
+func (s *SRTSink) WriteSample(i int, buf []byte, ptsMicroseconds int64) (bool, error) {
 	t := s.tracks[i]
 
 	switch t.Codec.(type) {
 	case *mpegts.CodecH264, *mpegts.CodecH265:
-		return s.mpw.WriteH26x(t, ptsMicroseconds, ptsMicroseconds, false, [][]byte{buf})
+		return false, s.mpw.WriteH26x(t, ptsMicroseconds, ptsMicroseconds, false, [][]byte{buf})
 	case *mpegts.CodecOpus:
-		return s.mpw.WriteOpus(t, ptsMicroseconds, [][]byte{buf})
+		return false, s.mpw.WriteOpus(t, ptsMicroseconds, [][]byte{buf})
 	case *mpegts.CodecMPEG4Audio:
-		return s.mpw.WriteMPEG4Audio(t, ptsMicroseconds, [][]byte{buf})
+		return false, s.mpw.WriteMPEG4Audio(t, ptsMicroseconds, [][]byte{buf})
 	default:
-		return nil
+		return false, nil
 	}
 }
 

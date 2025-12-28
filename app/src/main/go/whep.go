@@ -52,6 +52,7 @@ func NewWHEPSink(url, bearerToken, encodedMediaFormatMimeTypes string) (*WHEPSin
 		settingEngine := webrtc.SettingEngine{}
 
 		settingEngine.SetNet(net)
+		settingEngine.SetICERenomination()
 
 		m := &webrtc.MediaEngine{}
 		if err := m.RegisterDefaultCodecs(); err != nil {
@@ -100,7 +101,7 @@ func NewWHEPSink(url, bearerToken, encodedMediaFormatMimeTypes string) (*WHEPSin
 	return &WHEPSink{tracks: tracks}, nil
 }
 
-func (s *WHEPSink) WriteSample(i int, buf []byte, ptsMicroseconds int64) error {
+func (s *WHEPSink) WriteSample(i int, buf []byte, ptsMicroseconds int64) (bool, error) {
 	t := s.tracks[i]
 
 	if t.ptsMicroseconds == 0 {
@@ -108,7 +109,7 @@ func (s *WHEPSink) WriteSample(i int, buf []byte, ptsMicroseconds int64) error {
 	}
 	duration := time.Duration(ptsMicroseconds-t.ptsMicroseconds) * time.Microsecond
 	t.ptsMicroseconds = ptsMicroseconds
-	return t.track.WriteSample(media.Sample{Data: buf, Duration: duration})
+	return false, t.track.WriteSample(media.Sample{Data: buf, Duration: duration})
 }
 
 func (s *WHEPSink) Close() error {

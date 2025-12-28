@@ -25,19 +25,8 @@ for ABI in arm64-v8a armeabi-v7a x86 x86_64; do
   fi
 done
 
-# Ensure we have gomobile
-if ! command -v gomobile &> /dev/null; then
-  echo "gomobile not found, installing..."
-  go install golang.org/x/mobile/cmd/gomobile@latest
-  gomobile init
-elif ! gomobile version > /dev/null 2>&1; then
-  echo "Initializing gomobile..."
-  gomobile init
-fi
-
-# Build the AAR
+# Build the AAR using go tool (gomobile is managed via go.mod tool directive)
 echo "Building kinetic AAR for Android API $ANDROID_API..."
-export GO111MODULE=on
-gomobile bind -target=android -androidapi=$ANDROID_API -o "$OUTPUT_DIR/kinetic.aar" .
+go tool gomobile bind -ldflags="-checklinkname=0" -target=android -androidapi=$ANDROID_API -o "$OUTPUT_DIR/kinetic.aar" .
 
 echo "Build complete. AAR file at: $OUTPUT_DIR/kinetic.aar"

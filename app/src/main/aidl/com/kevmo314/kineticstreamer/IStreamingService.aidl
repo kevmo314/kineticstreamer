@@ -6,7 +6,7 @@ parcelable StreamingConfiguration;
 interface IStreamingService {
     void setPreviewSurface(in android.view.Surface surface);
 
-    void startStreaming(in StreamingConfiguration configuration);
+    @nullable String startStreaming(in StreamingConfiguration configuration, String outputConfigurationsJson);
 
     void stopStreaming();
 

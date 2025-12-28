@@ -16,6 +16,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.kevmo314.kineticstreamer.ui.theme.KineticStreamerTheme
+import kotlinx.coroutines.flow.first
 
 class MainActivity : ComponentActivity() {
     companion object {
@@ -69,6 +70,77 @@ class MainActivity : ComponentActivity() {
                         RecordingSettingsScreen(settings = settings, navigateBack = {
                             navController.popBackStack()
                         })
+                    }
+                    composable("settings/output/add") {
+                        AddOutputScreen(
+                            navigateBack = { navController.popBackStack() },
+                            navigateTo = { navController.navigate(it) }
+                        )
+                    }
+                    composable("settings/output/whip") {
+                        AddWhipOutputScreen(
+                            onSave = { config ->
+                                kotlinx.coroutines.runBlocking {
+                                    val current = settings.outputConfigurations.first()
+                                    settings.setOutputConfigurations(current + config)
+                                }
+                            },
+                            navigateBack = {
+                                navController.popBackStack("settings", inclusive = false)
+                            }
+                        )
+                    }
+                    composable("settings/output/srt") {
+                        AddSrtOutputScreen(
+                            onSave = { config ->
+                                kotlinx.coroutines.runBlocking {
+                                    val current = settings.outputConfigurations.first()
+                                    settings.setOutputConfigurations(current + config)
+                                }
+                            },
+                            navigateBack = {
+                                navController.popBackStack("settings", inclusive = false)
+                            }
+                        )
+                    }
+                    composable("settings/output/rtmp") {
+                        AddRtmpOutputScreen(
+                            onSave = { config ->
+                                kotlinx.coroutines.runBlocking {
+                                    val current = settings.outputConfigurations.first()
+                                    settings.setOutputConfigurations(current + config)
+                                }
+                            },
+                            navigateBack = {
+                                navController.popBackStack("settings", inclusive = false)
+                            }
+                        )
+                    }
+                    composable("settings/output/rtsp") {
+                        AddRtspOutputScreen(
+                            onSave = { config ->
+                                kotlinx.coroutines.runBlocking {
+                                    val current = settings.outputConfigurations.first()
+                                    settings.setOutputConfigurations(current + config)
+                                }
+                            },
+                            navigateBack = {
+                                navController.popBackStack("settings", inclusive = false)
+                            }
+                        )
+                    }
+                    composable("settings/output/disk") {
+                        AddDiskOutputScreen(
+                            onSave = { config ->
+                                kotlinx.coroutines.runBlocking {
+                                    val current = settings.outputConfigurations.first()
+                                    settings.setOutputConfigurations(current + config)
+                                }
+                            },
+                            navigateBack = {
+                                navController.popBackStack("settings", inclusive = false)
+                            }
+                        )
                     }
                 }
             }
