@@ -5,7 +5,6 @@ import (
 	"log"
 	"runtime/debug"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -21,24 +20,22 @@ import (
 )
 
 type RTSPServerSink struct {
-	disk   *DiskSink
+	disk   *BinaryDumpSink
 	s      *gortsplib.Server
 	stream *gortsplib.ServerStream
 
 	recordedPlaybackRequestId atomic.Uint32
 
 	tracks []*rtspTrack
+
+	pts0 int64
 }
 
 type rtspTrack struct {
-	sync.Mutex
-
 	media *description.Media
 
 	mtu, seq  uint16
 	payloader rtp.Payloader
-
-	pts0 int64
 }
 
 // called when a connection is opened.
@@ -101,7 +98,7 @@ func (sh *RTSPServerSink) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.R
 			StatusCode: base.StatusOK,
 		}, nil
 	}
-	log.Printf("got range header: %#v", rangeHeader)
+
 	h := &headers.Range{}
 	if err := h.Unmarshal(rangeHeader); err != nil {
 		return &base.Response{
@@ -128,48 +125,43 @@ func (sh *RTSPServerSink) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.R
 		}, nil
 	}
 	requestId := sh.recordedPlaybackRequestId.Add(1)
-	for i, t := range sh.tracks {
-		requestedPTS := t.pts0 + dpts
-		log.Printf("reading from %d", requestedPTS)
-		reader, err := sh.disk.Track(i).SampleReader(requestedPTS)
-		if err != nil {
-			return &base.Response{StatusCode: base.StatusInternalServerError}, err
-		}
-		go func(t *rtspTrack) {
-			for sh.recordedPlaybackRequestId.Load() == requestId {
-				sample, err := reader.Next()
-				if err != nil {
+	requestedPTS := sh.pts0 + dpts
+	log.Printf("reading from %d", requestedPTS)
+	sr, err := sh.disk.SampleReader(requestedPTS)
+	if err != nil {
+		return &base.Response{StatusCode: base.StatusInternalServerError}, err
+	}
+	go func() {
+		for sh.recordedPlaybackRequestId.Load() == requestId {
+			sample, err := sr.Next()
+			if err != nil {
+				return
+			}
+
+			t := sh.tracks[sample.Track]
+
+			pts := time.Duration(sample.PTS) * time.Microsecond
+			ts := uint32(pts.Seconds() * float64(t.media.Formats[0].ClockRate()))
+
+			payloads := t.payloader.Payload(t.mtu-12, sample.Data)
+
+			for i, pp := range payloads {
+				if err := sh.stream.WritePacketRTP(t.media, &rtp.Packet{
+					Header: rtp.Header{
+						Version:        2,
+						Marker:         i == len(payloads)-1,
+						PayloadType:    t.media.Formats[0].PayloadType(),
+						SequenceNumber: t.seq,
+						Timestamp:      ts,
+					},
+					Payload: pp,
+				}); err != nil {
 					return
 				}
-
-				t.Lock()
-
-				pts := time.Duration(sample.PTS) * time.Microsecond
-				ts := uint32(pts.Seconds() * float64(t.media.Formats[0].ClockRate()))
-
-				payloads := t.payloader.Payload(t.mtu-12, sample.Data)
-
-				for i, pp := range payloads {
-					if err := sh.stream.WritePacketRTP(t.media, &rtp.Packet{
-						Header: rtp.Header{
-							Version:        2,
-							Marker:         i == len(payloads)-1,
-							PayloadType:    t.media.Formats[0].PayloadType(),
-							SequenceNumber: t.seq,
-							Timestamp:      ts,
-						},
-						Payload: pp,
-					}); err != nil {
-						t.Unlock()
-						return
-					}
-					t.seq++
-				}
-
-				t.Unlock()
+				t.seq++
 			}
-		}(t)
-	}
+		}
+	}()
 	return &base.Response{
 		StatusCode: base.StatusOK,
 	}, nil
@@ -265,7 +257,7 @@ func toMediaAndPayloader(mediaFormatMimeType string, pt uint8) (*description.Med
 	}
 }
 
-func NewRTSPServerSink(disk *DiskSink, encodedMediaFormatMimeTypes string) (*RTSPServerSink, error) {
+func NewRTSPServerSink(disk *BinaryDumpSink, encodedMediaFormatMimeTypes string) (*RTSPServerSink, error) {
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Printf("panic: %s\n", debug.Stack())
@@ -312,23 +304,20 @@ func NewRTSPServerSink(disk *DiskSink, encodedMediaFormatMimeTypes string) (*RTS
 	return s, nil
 }
 
-func (s *RTSPServerSink) WriteSample(i int, buf []byte, ptsMicroseconds int64) (bool, error) {
+func (s *RTSPServerSink) WriteSample(i int, buf []byte, ptsMicroseconds int64) error {
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Printf("panic: %s\n", debug.Stack())
 		}
 	}()
 	if s.recordedPlaybackRequestId.Load() > 0 {
-		return false, nil
+		return nil
 	}
 
 	t := s.tracks[i]
 
-	t.Lock()
-	defer t.Unlock()
-
-	if t.pts0 == 0 {
-		t.pts0 = ptsMicroseconds
+	if s.pts0 == 0 {
+		s.pts0 = ptsMicroseconds
 	}
 
 	pts := time.Duration(ptsMicroseconds) * time.Microsecond
@@ -347,11 +336,11 @@ func (s *RTSPServerSink) WriteSample(i int, buf []byte, ptsMicroseconds int64) (
 			},
 			Payload: pp,
 		}); err != nil {
-			return false, err
+			return err
 		}
 		t.seq++
 	}
-	return false, nil
+	return nil
 }
 
 func (s *RTSPServerSink) Close() error {

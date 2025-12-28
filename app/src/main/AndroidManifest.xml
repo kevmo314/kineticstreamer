@@ -8,11 +8,14 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
         android:allowBackup="true"
@@ -27,6 +30,7 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:screenOrientation="userLandscape"
             android:theme="@style/Theme.KineticStreamer">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -34,10 +38,27 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity
+            android:name=".PermissionRequestActivity"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:screenOrientation="userLandscape"
+            android:exported="false" />
         <service
             android:name=".StreamingService"
             android:enabled="true"
-            android:foregroundServiceType="camera" />
+            android:foregroundServiceType="camera|microphone" />
+        <receiver
+            android:name=".StreamingService$UsbReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+                <action android:name="android.hardware.usb.action.USB_DEVICE_DETACHED" />
+                <action android:name="android.hardware.usb.action.USB_ACCESSORY_ATTACHED" />
+                <action android:name="android.hardware.usb.action.USB_ACCESSORY_DETACHED" />
+                <action android:name="android.hardware.usb.action.USB_ACCESSORY_HANDSHAKE" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>

@@ -1,18 +1,30 @@
 // IStreamingService.aidl
 package com.kevmo314.kineticstreamer;
 
+import com.kevmo314.kineticstreamer.IAudioLevelCallback;
+
 parcelable StreamingConfiguration;
+parcelable VideoSourceDevice;
 
 interface IStreamingService {
     void setPreviewSurface(in android.view.Surface surface);
 
-    @nullable String startStreaming(in StreamingConfiguration configuration, String outputConfigurationsJson);
+    void startStreaming(in StreamingConfiguration configuration);
 
     void stopStreaming();
 
     boolean isStreaming();
-
-    @nullable String getActiveCameraId();
-
-    void setActiveCameraId(String cameraId);
+    
+    int getCurrentBitrate();
+    
+    float getCurrentFps();
+    
+    void setAudioLevelCallback(in IAudioLevelCallback callback);
+    
+    // WebView overlay methods
+    void setWebViewOverlay(in String url, int x, int y, int width, int height);
+    
+    void updateWebViewOverlay(in String url, int x, int y, int width, int height);
+    
+    void removeWebViewOverlay();
 }

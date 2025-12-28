@@ -1,13 +1,10 @@
 package com.kevmo314.kineticstreamer
 
 import android.Manifest
-import android.content.ComponentName
-import android.util.Log
 import android.content.Context
-import android.content.Intent
-import android.content.ServiceConnection
 import android.os.Build
-import android.os.IBinder
+import android.util.Log
+import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.ViewGroup
@@ -15,7 +12,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeGesturesPadding
 import androidx.compose.foundation.layout.size
@@ -33,19 +29,25 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.runInterruptible
 
 val REQUIRED_PERMISSIONS =
     mutableListOf(
@@ -60,106 +62,146 @@ val REQUIRED_PERMISSIONS =
 @Composable
 fun MainScreen(
     settings: Settings,
+    streamingService: IStreamingService?,
     navigateToSettings: () -> Unit) {
     val permissionsState = rememberMultiplePermissionsState(REQUIRED_PERMISSIONS)
 
     Surface(
         modifier = Modifier.fillMaxSize(),
-        color = MaterialTheme.colorScheme.background
+        color = Color.Black
     ) {
         if (!permissionsState.allPermissionsGranted) {
-            Column {
-                Text(
-                    "Camera permission required for this feature to be available. " +
-                            "Please grant the permission"
-                )
-                Button(onClick = {
-                    permissionsState.launchMultiplePermissionRequest()
-                }) {
-                    Text("Request permission")
-                }
+            LaunchedEffect(Unit) {
+                permissionsState.launchMultiplePermissionRequest()
             }
         } else {
             val cameraSelectorDialogOpen = remember { mutableStateOf(false) }
-            val streamingService = remember { mutableStateOf<IStreamingService?>(null) }
+            val coroutineScope = rememberCoroutineScope()
 
             val applicationContext = LocalContext.current
 
-            DisposableEffect(applicationContext) {
-                val connection = object : ServiceConnection {
-                    override fun onServiceConnected(
-                        className: ComponentName,
-                        service: IBinder
-                    ) {
-                        streamingService.value =
-                            IStreamingService.Stub.asInterface(service)
-                    }
+            val stub = streamingService
+            val previewSurface = remember { mutableStateOf<Surface?>(null) }
 
-                    override fun onServiceDisconnected(name: ComponentName?) {
-                        streamingService.value = null
-                    }
-                }
-
-                applicationContext.bindService(
-                    Intent(
-                        applicationContext,
-                        StreamingService::class.java
-                    ).apply {
-                        action = IStreamingService::class.java.name
-                    }, connection, Context.BIND_AUTO_CREATE
-                )
-
-                onDispose {
-                    applicationContext.unbindService(connection)
+            // Set preview surface when both stub and surface are available
+            LaunchedEffect(stub, previewSurface.value) {
+                val surface = previewSurface.value
+                if (stub != null && surface != null && surface.isValid) {
+                    Log.i("KineticStreamer", "Setting preview surface from LaunchedEffect: $surface")
+                    stub.setPreviewSurface(surface)
                 }
             }
 
-            val stub = streamingService.value
-
             if (stub != null) {
                 val isStreaming = remember(stub) { mutableStateOf(stub.isStreaming) }
-
-                AndroidView(
-                    modifier = Modifier.fillMaxSize(),
-                    factory = { context ->
-                        SurfaceView(context).apply {
-                            layoutParams = ViewGroup.LayoutParams(
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                                ViewGroup.LayoutParams.MATCH_PARENT
-                            )
-                            holder.addCallback(object : SurfaceHolder.Callback {
-                                override fun surfaceCreated(holder: SurfaceHolder) {
-                                    Log.i("MainActivity", "surfaceCreated")
-
-                                    streamingService.value?.setPreviewSurface(
-                                        holder.surface
-                                    )
-                                }
-
-                                override fun surfaceChanged(
-                                    holder: SurfaceHolder,
-                                    format: Int,
-                                    width: Int,
-                                    height: Int
-                                ) {
-                                    Log.i("MainActivity", "surfaceChanged")
-                                }
-
-                                override fun surfaceDestroyed(holder: SurfaceHolder) {
-                                    Log.i("MainActivity", "surfaceDestroyed")
-
-                                    streamingService.value?.setPreviewSurface(null)
-                                }
-                            })
+                val currentBitrate = remember { mutableIntStateOf(0) }
+                val currentFps = remember { mutableStateOf(0f) }
+                val audioLevels = remember { mutableStateOf(emptyList<Float>()) }
+                
+                // Set up audio level callback
+                LaunchedEffect(stub) {
+                    stub.setAudioLevelCallback(object : IAudioLevelCallback.Stub() {
+                        override fun onAudioLevels(levels: FloatArray?) {
+                            levels?.let {
+                                audioLevels.value = it.toList()
+                            }
                         }
-                    },
-                )
+                    })
+                }
+                
+                // Periodically update bitrate and FPS when streaming
+                LaunchedEffect(isStreaming.value) {
+                    if (isStreaming.value) {
+                        while (isStreaming.value) {
+                            currentBitrate.intValue = stub.currentBitrate
+                            currentFps.value = stub.currentFps
+                            delay(250) // Update 4 times per second
+                        }
+                    } else {
+                        currentBitrate.intValue = 0
+                        currentFps.value = 0f
+                    }
+                }
 
-                Column(
-                    horizontalAlignment = Alignment.End,
-                    verticalArrangement = Arrangement.SpaceEvenly,
-                    modifier = Modifier.safeGesturesPadding(),
-                ) {
+                Box(modifier = Modifier.fillMaxSize()) {
+                    AndroidView(
+                        modifier = Modifier.fillMaxSize(),
+                        factory = { context ->
+                            SurfaceView(context).apply {
+                                layoutParams = ViewGroup.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    ViewGroup.LayoutParams.MATCH_PARENT
+                                )
+                                // Force landscape buffer dimensions
+                                holder.setFixedSize(1920, 1080)
+                                holder.addCallback(object : SurfaceHolder.Callback {
+                                    override fun surfaceCreated(holder: SurfaceHolder) {
+                                        val frame = holder.surfaceFrame
+                                        Log.i("KineticStreamer", "surfaceCreated: frame=${frame.width()}x${frame.height()}, surface=${holder.surface}")
+                                        Log.i("KineticStreamer", "SurfaceView size: ${this@apply.width}x${this@apply.height}")
+                                        Log.i("KineticStreamer", "SurfaceView measuredSize: ${this@apply.measuredWidth}x${this@apply.measuredHeight}")
+                                        // Store surface - LaunchedEffect will set it on the service
+                                        previewSurface.value = holder.surface
+                                    }
+
+                                    override fun surfaceChanged(
+                                        holder: SurfaceHolder,
+                                        format: Int,
+                                        width: Int,
+                                        height: Int
+                                    ) {
+                                        val frame = holder.surfaceFrame
+                                        Log.i("KineticStreamer", "surfaceChanged: ${width}x${height} format=$format, frame=${frame.width()}x${frame.height()}")
+                                    }
+
+                                    override fun surfaceDestroyed(holder: SurfaceHolder) {
+                                        previewSurface.value = null
+                                        streamingService?.setPreviewSurface(null)
+                                    }
+                                })
+                            }
+                        },
+                    )
+                    
+                    // Bitrate and FPS display in top left
+                    if (isStreaming.value && (currentBitrate.intValue > 0 || currentFps.value > 0)) {
+                        Column(
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .padding(16.dp)
+                                .safeGesturesPadding()
+                        ) {
+                            if (currentBitrate.intValue > 0) {
+                                Text(
+                                    text = "${currentBitrate.intValue / 1000} Kbps",
+                                    color = Color.White,
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            if (currentFps.value > 0) {
+                                Text(
+                                    text = "%.1f fps".format(currentFps.value),
+                                    color = Color.White,
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Normal
+                                )
+                            }
+                        }
+                    }
+
+                    Column(
+                        horizontalAlignment = Alignment.End,
+                        verticalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .safeGesturesPadding(),
+                    ) {
+                    // Top controls
+                    Column(
+                        horizontalAlignment = Alignment.End,
+                        verticalArrangement = Arrangement.spacedBy(16.dp),
+                    ) {
                     IconButton(
                         modifier = Modifier.size(64.dp).padding(16.dp),
                         onClick = {
@@ -167,37 +209,21 @@ fun MainScreen(
                             cameraSelectorDialogOpen.value = true
                         },
                     ) {
-                        Box(modifier = Modifier.fillMaxSize()) {
-                            Icon(
-                                Icons.Filled.Cameraswitch,
-                                contentDescription = null,
-                                modifier = Modifier.fillMaxSize().offset(1.dp, 1.dp),
-                                tint = Color.Black.copy(alpha = 0.5f),
-                            )
-                            Icon(
-                                Icons.Filled.Cameraswitch,
-                                contentDescription = "Switch camera",
-                                modifier = Modifier.fillMaxSize(),
-                                tint = Color.White,
-                            )
-                        }
+                        Icon(
+                            Icons.Filled.Cameraswitch,
+                            contentDescription = "Switch camera",
+                            modifier = Modifier.fillMaxSize(),
+                            tint = Color.White,
+                        )
                     }
                     Button(
                         onClick = {
                             if (isStreaming.value) {
-                                Log.i("MainScreen", "Stopping streaming")
                                 stub.stopStreaming()
                                 isStreaming.value = false
                             } else {
                                 runBlocking {
-                                    val streamingConfig = settings.getStreamingConfiguration()
-                                    val outputConfigs = settings.outputConfigurations.first()
-                                    val outputConfigsJson = OutputConfiguration.listToJSON(outputConfigs)
-                                    Log.i("MainScreen", "Starting streaming with config: $outputConfigsJson")
-                                    val error = stub.startStreaming(streamingConfig, outputConfigsJson)
-                                    if (error != null) {
-                                        Log.e("MainScreen", "Streaming error: $error")
-                                    }
+                                    stub.startStreaming(settings.getStreamingConfiguration())
                                     isStreaming.value = true
                                 }
                             }
@@ -208,7 +234,9 @@ fun MainScreen(
                         } else {
                             CircleShape
                         },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color.Red),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isStreaming.value) Color.Green else Color.Red
+                        ),
                     ) {
                     }
                     IconButton(
@@ -217,32 +245,70 @@ fun MainScreen(
                             navigateToSettings()
                         },
                     ) {
-                        Box(modifier = Modifier.fillMaxSize()) {
-                            Icon(
-                                Icons.Filled.Settings,
-                                contentDescription = null,
-                                modifier = Modifier.fillMaxSize().offset(1.dp, 1.dp),
-                                tint = Color.Black.copy(alpha = 0.5f),
-                            )
-                            Icon(
-                                Icons.Filled.Settings,
-                                contentDescription = "Settings",
-                                modifier = Modifier.fillMaxSize(),
-                                tint = Color.White,
-                            )
-                        }
+                        Icon(
+                            Icons.Filled.Settings,
+                            contentDescription = "Settings",
+                            modifier = Modifier.fillMaxSize(),
+                            tint = Color.White,
+                        )
+                    }
+                    }
+                    
+                    // Audio visualizer at bottom
+                    AudioVisualizerView(
+                        audioLevels = audioLevels.value,
+                        modifier = Modifier.padding(16.dp)
+                    )
                     }
                 }
 
                 if (cameraSelectorDialogOpen.value) {
-                    CameraSelector(
+                    val selectedAudioDeviceId = remember { mutableStateOf<Int?>(null) }
+                    val selectedVideoDevice = remember { mutableStateOf<VideoSourceDevice?>(null) }
+                    val usbManager = applicationContext.getSystemService(Context.USB_SERVICE) as android.hardware.usb.UsbManager
+                    
+                    // Load selected devices from settings
+                    LaunchedEffect(Unit) {
+                        // Load audio device
+                        settings.selectedAudioDevice.collect { deviceId ->
+                            selectedAudioDeviceId.value = deviceId
+                        }
+                    }
+                    
+                    LaunchedEffect(Unit) {
+                        // Load video device
+                        settings.selectedVideoDevice.collect { identifier ->
+                            if (identifier != null) {
+                                val usbDevices = usbManager.deviceList.values.toList()
+                                selectedVideoDevice.value = VideoSourceDevice.fromIdentifier(identifier, usbDevices)
+                            } else {
+                                selectedVideoDevice.value = null
+                            }
+                        }
+                    }
+                    
+                    DeviceSelector(
                         onDismissRequest = {
                             cameraSelectorDialogOpen.value = false
                         },
-                        selectedCameraId = stub.activeCameraId,
-                        onCameraSelected = {
-                            stub.activeCameraId = it
+                        selectedVideoDevice = selectedVideoDevice.value,
+                        onVideoDeviceSelected = { device ->
+                            println("Selected video device: $device")
+                            
+                            // Save the video selection to Settings
+                            coroutineScope.launch {
+                                settings.setSelectedVideoDevice(device)
+                                selectedVideoDevice.value = device
+                            }
                         },
+                        selectedAudioDeviceId = selectedAudioDeviceId.value,
+                        onAudioDeviceSelected = { deviceId ->
+                            // Save the audio selection to Settings
+                            coroutineScope.launch {
+                                settings.setSelectedAudioDevice(deviceId)
+                                selectedAudioDeviceId.value = deviceId
+                            }
+                        }
                     )
                 }
             }

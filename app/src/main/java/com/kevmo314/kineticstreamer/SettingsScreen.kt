@@ -13,7 +13,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Divider
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -23,6 +23,8 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -30,6 +32,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.runBlocking
 
@@ -85,18 +88,7 @@ fun SettingsScreen(
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp)
-            ) {
-                Text("Outputs", modifier = Modifier.weight(1f))
-                IconButton(onClick = { navigateTo("settings/output/add") }) {
-                    Icon(
-                        imageVector = Icons.Filled.Add,
-                        contentDescription = "Add output"
-                    )
-                }
-            }
+            Text("Outputs", modifier = Modifier.padding(16.dp))
 
             val outputConfigurations = settings.outputConfigurations.collectAsState(initial = emptyList())
 
@@ -104,7 +96,7 @@ fun SettingsScreen(
                 Surface(onClick = {
                     runBlocking {
                         val updatedConfigurations = outputConfigurations.value.toMutableList()
-                        updatedConfigurations[index] = outputConfiguration.withEnabled(!outputConfiguration.enabled)
+                        updatedConfigurations[index] = outputConfiguration.copy(enabled = !outputConfiguration.enabled)
                         settings.setOutputConfigurations(updatedConfigurations)
                     }
                 }) {
@@ -115,19 +107,31 @@ fun SettingsScreen(
                         Checkbox(checked = outputConfiguration.enabled, onCheckedChange = {
                             runBlocking {
                                 val updatedConfigurations = outputConfigurations.value.toMutableList()
-                                updatedConfigurations[index] = outputConfiguration.withEnabled(!outputConfiguration.enabled)
+                                updatedConfigurations[index] = outputConfiguration.copy(enabled = !outputConfiguration.enabled)
                                 settings.setOutputConfigurations(updatedConfigurations)
                             }
                         })
                         Column {
                             Text(outputConfiguration.protocol)
-                            Text(outputConfiguration.displayName)
+                            Text(outputConfiguration.url)
                         }
                     }
                 }
             }
 
-            HorizontalDivider()
+            Surface(onClick = { navigateTo("settings/output") }) {
+                ListItem(
+                    headlineContent = { Text("Add Output") },
+                    leadingContent = {
+                        Icon(
+                            imageVector = Icons.Filled.Add,
+                            contentDescription = "Add output"
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+            Divider()
 
             Text("Codec", modifier = Modifier.padding(16.dp))
 

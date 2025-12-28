@@ -1,25 +1,29 @@
 package kinetic
 
 /*
-#cgo android,arm64 CFLAGS: -I${SRCDIR}/third_party/srt/scripts/build-android/arm64-v8a/include
-#cgo android,arm64 LDFLAGS: -L${SRCDIR}/third_party/srt/scripts/build-android/arm64-v8a/lib -lsrt
-#cgo android,arm CFLAGS: -I${SRCDIR}/third_party/srt/scripts/build-android/armeabi-v7a/include
-#cgo android,arm LDFLAGS: -L${SRCDIR}/third_party/srt/scripts/build-android/armeabi-v7a/lib -lsrt
-#cgo android,386 CFLAGS: -I${SRCDIR}/third_party/srt/scripts/build-android/x86/include
-#cgo android,386 LDFLAGS: -L${SRCDIR}/third_party/srt/scripts/build-android/x86/lib -lsrt
-#cgo android,amd64 CFLAGS: -I${SRCDIR}/third_party/srt/scripts/build-android/x86_64/include
-#cgo android,amd64 LDFLAGS: -L${SRCDIR}/third_party/srt/scripts/build-android/x86_64/lib -lsrt
+#cgo android,arm64 CFLAGS: -I${SRCDIR}/../third_party/output/arm64-v8a/include
+#cgo android,arm64 LDFLAGS: -L${SRCDIR}/../third_party/output/arm64-v8a/lib -lsrt
+#cgo android,arm CFLAGS: -I${SRCDIR}/../third_party/output/armeabi-v7a/include
+#cgo android,arm LDFLAGS: -L${SRCDIR}/../third_party/output/armeabi-v7a/lib -lsrt
+#cgo android,386 CFLAGS: -I${SRCDIR}/../third_party/output/x86/include
+#cgo android,386 LDFLAGS: -L${SRCDIR}/../third_party/output/x86/lib -lsrt
+#cgo android,amd64 CFLAGS: -I${SRCDIR}/../third_party/output/x86_64/include
+#cgo android,amd64 LDFLAGS: -L${SRCDIR}/../third_party/output/x86_64/lib -lsrt
+#cgo linux,amd64 CFLAGS: -I${SRCDIR}/../third_party/output/x86_64/include
 
 #include <srt/srt.h>
 */
 import "C"
 import (
+	"bufio"
 	"fmt"
 	"net"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/bluenviron/mediacommon/pkg/formats/mpegts"
@@ -151,17 +155,28 @@ func srtGetAndClearError() error {
 	return fmt.Errorf("srt error %d", srterr)
 }
 
-type SRTSocket C.int
+type SRTSocket struct {
+	fd          C.int
+	payloadSize int
+}
 
-func (s SRTSocket) Write(buf []byte) (int, error) {
-	n := int(C.srt_sendmsg2(C.int(s), (*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf)), nil))
-	if n < 0 {
-		return 0, fmt.Errorf("srt_sendmsg2: %w", srtGetAndClearError())
+func (s SRTSocket) Write(p []byte) (int, error) {
+	for i := 0; i < len(p); i += s.payloadSize {
+		size := s.payloadSize
+		if i+size > len(p) {
+			size = len(p) - i
+		}
+		n, err := C.srt_send(s.fd, (*C.char)(unsafe.Pointer(&p[i])), C.int(size))
+		if n == -1 {
+			return 0, fmt.Errorf("failed to send payload: %w", err)
+		}
 	}
-	return n, nil
+	return len(p), nil
 }
 
 type SRTSink struct {
+	sync.Mutex
+
 	mpw    *mpegts.Writer
 	sck    SRTSocket
 	tracks []*mpegts.Track
@@ -234,54 +249,66 @@ func NewSRTSink(s, encodedMediaFormatMimeTypes string) (*SRTSink, error) {
 		options[v[0]] = v[1]
 	}
 
-	tracks := []*mpegts.Track{}
-	for i, v := range strings.Split(encodedMediaFormatMimeTypes, ";") {
-		tracks = append(tracks, &mpegts.Track{
-			PID:   uint16(i),
-			Codec: MediaFormatMimeType(v).MPEGTSCodec(),
-		})
-	}
-
 	if sinkCount == 0 {
 		C.srt_startup()
 	}
 	sinkCount++
+	fd := C.srt_create_socket()
 
-	sck := SRTSocket(C.srt_create_socket())
-
-	if err := setSocketOptions(C.int(sck), bindingPre, options); err != nil {
+	if err := setSocketOptions(fd, bindingPre, options); err != nil {
 		return nil, err
 	}
 
-	if res := C.srt_connect(C.int(sck), sa, C.int(salen)); res == -1 {
-		C.srt_close(C.int(sck))
+	if res := C.srt_connect(fd, sa, C.int(salen)); res == -1 {
+		C.srt_close(fd)
 		return nil, fmt.Errorf("srt_connect: %w", srtGetAndClearError())
 	}
 
-	if err := setSocketOptions(C.int(sck), bindingPost, options); err != nil {
+	if err := setSocketOptions(fd, bindingPost, options); err != nil {
 		return nil, err
 	}
 
-	return &SRTSink{mpw: mpegts.NewWriter(sck, tracks), sck: sck, tracks: tracks}, nil
+	var payloadSize C.int
+	if res, err := C.srt_getsockflag(fd, C.SRTO_PAYLOADSIZE, unsafe.Pointer(&payloadSize), (*C.int)(unsafe.Pointer(&payloadSize))); res == -1 {
+		return nil, fmt.Errorf("failed to get socket option: %w", err)
+	}
+
+	sck := SRTSocket{fd: fd, payloadSize: int(payloadSize)}
+
+	tracks := []*mpegts.Track{}
+	for _, v := range strings.Split(encodedMediaFormatMimeTypes, ";") {
+		tracks = append(tracks, &mpegts.Track{
+			Codec: MediaFormatMimeType(v).MPEGTSCodec(),
+		})
+	}
+
+	return &SRTSink{mpw: mpegts.NewWriter(bufio.NewWriterSize(sck, int(payloadSize)), tracks), sck: sck, tracks: tracks}, nil
 }
 
-func (s *SRTSink) WriteSample(i int, buf []byte, ptsMicroseconds int64) (bool, error) {
+
+
+func (s *SRTSink) WriteSample(i int, buf []byte, ptsMicroseconds int64, mediaCodecFlags int32) error {
 	t := s.tracks[i]
+
+// 	isKeyframe := MediaCodecBufferFlag(mediaCodecFlags)&MediaCodecBufferFlagKeyFrame != 0
+
+	pts := int64((time.Duration(ptsMicroseconds) * time.Microsecond).Seconds() * 90000)
 
 	switch t.Codec.(type) {
 	case *mpegts.CodecH264, *mpegts.CodecH265:
-		return false, s.mpw.WriteH26x(t, ptsMicroseconds, ptsMicroseconds, false, [][]byte{buf})
+// 		return s.mpw.WriteVideo(t, pts, pts, isKeyframe, buf)
+        return nil
 	case *mpegts.CodecOpus:
-		return false, s.mpw.WriteOpus(t, ptsMicroseconds, [][]byte{buf})
+		return s.mpw.WriteOpus(t, pts, [][]byte{buf})
 	case *mpegts.CodecMPEG4Audio:
-		return false, s.mpw.WriteMPEG4Audio(t, ptsMicroseconds, [][]byte{buf})
+		return s.mpw.WriteMPEG4Audio(t, pts, [][]byte{buf})
 	default:
-		return false, nil
+		return nil
 	}
 }
 
 func (s *SRTSink) Close() error {
-	C.srt_close(C.int(s.sck))
+	C.srt_close(s.sck.fd)
 	sinkCount--
 	if sinkCount == 0 {
 		C.srt_cleanup()

@@ -17,4 +17,4 @@ local.properties
 # Go library dependencies and third-party code
 **/third_party/
 app/src/main/libs/
-app/build/go-lib/
+app/src/main/jniLibs/

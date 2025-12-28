@@ -18,8 +18,12 @@ data class StreamingConfiguration(val videoCodec: String, val audioCodec: String
                 MediaFormat.KEY_COLOR_FORMAT,
                 MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
             )
-            format.setInteger(MediaFormat.KEY_BIT_RATE, 4 * 1024 * 1024)
-            format.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                format.setInteger(MediaFormat.KEY_PIXEL_ASPECT_RATIO_HEIGHT, 1)
+                format.setInteger(MediaFormat.KEY_PIXEL_ASPECT_RATIO_WIDTH, 1)
+            }
+            format.setInteger(MediaFormat.KEY_BIT_RATE, 3 * 1024 * 1024)
+            format.setInteger(MediaFormat.KEY_FRAME_RATE, 25)
             format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
             return format
         }
