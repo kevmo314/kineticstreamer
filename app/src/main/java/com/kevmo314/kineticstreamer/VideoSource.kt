@@ -40,7 +40,7 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 import java.nio.ByteBuffer
-import java.util.concurrent.LinkedBlockingDeque
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -84,8 +84,10 @@ fun createVideoTexture(): Int {
     return texId
 }
 
+data class CameraSessionResult(val device: CameraDevice?, val session: CameraCaptureSession?)
+
 @androidx.annotation.RequiresPermission(android.Manifest.permission.CAMERA)
-suspend fun openCamera(cameraManager: CameraManager, outputSurface: Surface, handler: Handler, cameraId: String): CameraCaptureSession? = suspendCoroutine { continuation ->
+suspend fun openCamera(cameraManager: CameraManager, outputSurface: Surface, handler: Handler, cameraId: String): CameraSessionResult = suspendCoroutine { continuation ->
     cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
         override fun onOpened(camera: CameraDevice) {
             val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
@@ -102,12 +104,13 @@ suspend fun openCamera(cameraManager: CameraManager, outputSurface: Surface, han
                     object : CameraCaptureSession.StateCallback() {
                         override fun onConfigured(session: CameraCaptureSession) {
                             session.setRepeatingRequest(request, null, handler)
-                            continuation.resume(session)
+                            continuation.resume(CameraSessionResult(camera, session))
                         }
 
                         override fun onConfigureFailed(session: CameraCaptureSession) {
                             Log.e("StreamingService", "Failed to configure camera session")
-                            continuation.resume(null)
+                            camera.close()
+                            continuation.resume(CameraSessionResult(null, null))
                         }
                     }
                 )
@@ -115,23 +118,25 @@ suspend fun openCamera(cameraManager: CameraManager, outputSurface: Surface, han
         }
 
         override fun onDisconnected(camera: CameraDevice) {
-            continuation.resume(null)
+            camera.close()
+            continuation.resume(CameraSessionResult(null, null))
         }
 
         override fun onError(camera: CameraDevice, error: Int) {
             Log.e("StreamingService", "Camera error: $error")
-            continuation.resume(null)
+            camera.close()
+            continuation.resume(CameraSessionResult(null, null))
         }
     }, handler)
 }
 
 
-fun openUsbCamera(context: Context, device: UsbDevice, outputSurface: Surface): Triple<UsbDeviceConnection?, UVCStream?, Thread?> {
+fun openUsbCamera(context: Context, device: UsbDevice, outputSurface: Surface): Quadruple<UsbDeviceConnection?, UVCStream?, Thread?, MediaCodec?> {
     val manager = context.getSystemService(Context.USB_SERVICE) as UsbManager
     val conn = manager.openDevice(device)
     if (conn == null) {
         Log.e("VideoSource", "Failed to open USB device")
-        return Triple(null, null, null)
+        return Quadruple(null, null, null, null)
     }
 
     // Initialize UVC source
@@ -141,15 +146,15 @@ fun openUsbCamera(context: Context, device: UsbDevice, outputSurface: Surface): 
         8, 1920, 1080, 30
     )
 
-    val thread = startUvcFrameProcessing(stream, outputSurface)
-    
-    return Triple(conn, stream, thread)
+    val (thread, decoder) = startUvcFrameProcessing(stream, outputSurface)
+
+    return Quadruple(conn, stream, thread, decoder)
 }
 
 // Data class to hold frame data and its PTS
 data class FrameWithPTS(val data: ByteArray, val pts: Long, val eof: Boolean = false)
 
-fun startUvcFrameProcessing(stream: UVCStream, outputSurface: Surface): Thread {
+fun startUvcFrameProcessing(stream: UVCStream, outputSurface: Surface): Pair<Thread, MediaCodec> {
     val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, 1920, 1080)
     // Set additional format parameters for H264 from USB cameras
     format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
@@ -159,10 +164,11 @@ fun startUvcFrameProcessing(stream: UVCStream, outputSurface: Surface): Thread {
     format.setInteger("input-buffer-count", 30)
 
     var sentOA4PPS = false
-    
-    var frameQueue = LinkedBlockingDeque<FrameWithPTS>();
 
-    MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).apply {
+    // Holds latest frame (replaces previous to avoid backup)
+    val latestFrame = AtomicReference<FrameWithPTS?>(null)
+
+    val decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).apply {
         setCallback(object : MediaCodec.Callback() {
             override fun onInputBufferAvailable(
                 codec: MediaCodec,
@@ -227,13 +233,13 @@ fun startUvcFrameProcessing(stream: UVCStream, outputSurface: Surface): Thread {
                     return
                 }
 
-                val frameWithPTS = frameQueue.poll()
+                val frameWithPTS = latestFrame.getAndSet(null)
                 if (frameWithPTS == null) {
                     // No frame available yet, return the buffer empty to avoid blocking
                     codec.queueInputBuffer(index, 0, 0, 0, 0)
                     return
                 }
-                
+
                 // Check for EOF
                 if (frameWithPTS.eof) {
                     Log.w("VideoSource", "Received EOF marker, stopping decoder")
@@ -285,19 +291,22 @@ fun startUvcFrameProcessing(stream: UVCStream, outputSurface: Surface): Thread {
         start()
     }
 
-    return thread {
+    val frameThread = thread {
         while (!Thread.currentThread().isInterrupted) {
             val frameData = stream.readFrame()
             if (frameData == null) {
                 // Signal EOF and exit
-                frameQueue.put(FrameWithPTS(ByteArray(0), 0, true))
+                latestFrame.set(FrameWithPTS(ByteArray(0), 0, true))
                 break
             }
             // Get the PTS for this frame from the UVC stream
             val pts = stream.getPTS()
-            frameQueue.put(FrameWithPTS(frameData, pts, false))
+            // Store latest frame (overwrites previous)
+            latestFrame.set(FrameWithPTS(frameData, pts, false))
         }
     }
+
+    return Pair(frameThread, decoder)
 }
 
 // Helper function to validate H264 NAL units
@@ -364,6 +373,7 @@ private fun validateH264Frame(data: ByteArray): Pair<Boolean, String> {
 )
 fun VideoSource(      context: Context,
                         device: VideoSourceDevice): Flow<SurfaceTexture> = callbackFlow {
+    var cameraDevice: CameraDevice? = null
     var captureSession: CameraCaptureSession? = null
 
     var activeUsbDeviceConnection: UsbDeviceConnection? = null
@@ -390,10 +400,11 @@ fun VideoSource(      context: Context,
     when (device) {
         is VideoSourceDevice.UsbCamera -> {
             Log.i("VideoSource", "Opening USB camera: ${device.usbDevice.productName}")
-            val (conn, uvcStream, thread) = openUsbCamera(context, device.usbDevice, outputSurface)
+            val (conn, uvcStream, thread, decoder) = openUsbCamera(context, device.usbDevice, outputSurface)
             activeUsbDeviceConnection = conn
             activeUvcStream = uvcStream
             activeUvcThread = thread
+            activeDecoder = decoder
         }
         is VideoSourceDevice.Camera -> {
             val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -403,7 +414,9 @@ fun VideoSource(      context: Context,
             val outputSizes = streamConfigMap?.getOutputSizes(android.graphics.SurfaceTexture::class.java)
             Log.i("VideoSource", "Opening camera ${device.cameraId}, sensor orientation: $sensorOrientation")
             Log.i("VideoSource", "Available output sizes: ${outputSizes?.take(5)?.joinToString()}")
-            captureSession = openCamera(cameraManager, outputSurface, handler, device.cameraId)
+            val result = openCamera(cameraManager, outputSurface, handler, device.cameraId)
+            cameraDevice = result.device
+            captureSession = result.session
         }
     }
 
@@ -417,12 +430,20 @@ fun VideoSource(      context: Context,
     }
 
     awaitClose {
+        // Stop the frame reading thread first
         activeUvcThread?.interrupt()
         activeUvcThread?.join()
+        // Stop and release the decoder before releasing surfaces
+        try {
+            activeDecoder?.stop()
+        } catch (e: Exception) {
+            Log.e("VideoSource", "Error stopping decoder: ${e.message}")
+        }
         activeDecoder?.release()
         activeUvcStream?.close()
         activeUsbDeviceConnection?.close()
         captureSession?.close()
+        cameraDevice?.close()
         outputSurface.release()
         outputSurfaceTexture.release()
         handlerThread.quitSafely()

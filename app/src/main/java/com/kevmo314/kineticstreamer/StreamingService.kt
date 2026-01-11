@@ -25,6 +25,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.os.PowerManager
+import android.net.wifi.WifiManager
 import android.provider.Settings as SystemSettings
 import android.util.Log
 import android.view.Surface
@@ -37,23 +38,31 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.buffer
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import java.util.concurrent.LinkedBlockingDeque
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
 
 
 class StreamingService : Service() {
     companion object {
         const val ACTION_SET_USB_DEVICE = "com.kevmo314.kineticstreamer.action.SET_USB_DEVICE"
+        const val ACTION_USB_DEVICE_CHANGED = "com.kevmo314.kineticstreamer.action.USB_DEVICE_CHANGED"
         const val EXTRA_USB_DEVICE = "com.kevmo314.kineticstreamer.extra.USB_DEVICE"
     }
 
@@ -63,15 +72,48 @@ class StreamingService : Service() {
         }
 
         override fun onReceive(context: Context, intent: Intent) {
-            if (ACTION_USB_PERMISSION == intent.action) {
-                synchronized(this) {
-                    val device: UsbDevice? = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
-                    if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
-                        context.startService(Intent(context, StreamingService::class.java).apply {
-                            action = ACTION_SET_USB_DEVICE
-                            putExtra(EXTRA_USB_DEVICE, device)
-                        })
+            when (intent.action) {
+                ACTION_USB_PERMISSION -> {
+                    synchronized(this) {
+                        val device: UsbDevice? = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+                        if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
+                            context.startService(Intent(context, StreamingService::class.java).apply {
+                                action = ACTION_SET_USB_DEVICE
+                                putExtra(EXTRA_USB_DEVICE, device)
+                            })
+                        }
                     }
+                }
+                UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
+                    val device: UsbDevice? = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+                    Log.i("UsbReceiver", "USB device attached: ${device?.productName}")
+
+                    // Check if it's a UVC camera and auto-open is enabled
+                    if (device != null && device.isUvc()) {
+                        val settings = Settings(DataStoreProvider.getDataStore(context))
+                        val autoOpen = runBlocking {
+                            settings.autoOpenOnUsbCamera.first()
+                        }
+                        if (autoOpen) {
+                            Log.i("UsbReceiver", "Auto-opening app for UVC camera: ${device.productName}")
+                            context.startActivity(Intent(context, MainActivity::class.java).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                            })
+                        }
+                    }
+
+                    // Trigger device refresh to attempt reconnection
+                    context.startService(Intent(context, StreamingService::class.java).apply {
+                        action = ACTION_USB_DEVICE_CHANGED
+                    })
+                }
+                UsbManager.ACTION_USB_DEVICE_DETACHED -> {
+                    val device: UsbDevice? = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+                    Log.i("UsbReceiver", "USB device detached: ${device?.productName}")
+                    // Trigger device refresh to handle disconnection
+                    context.startService(Intent(context, StreamingService::class.java).apply {
+                        action = ACTION_USB_DEVICE_CHANGED
+                    })
                 }
             }
         }
@@ -103,6 +145,10 @@ class StreamingService : Service() {
     private val audioScope = CoroutineScope(Dispatchers.IO + Job())
     private var debugAudioTrack: AudioTrack? = null // For debugging UAC audio playback
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+
+    // Flow to trigger device reconnection (emits Unit when USB device changes)
+    private val deviceRefreshTrigger = MutableSharedFlow<Unit>(replay = 0, extraBufferCapacity = 1)
     
     // Timestamp synchronization
     private var streamStartTimeNanos: Long = 0
@@ -111,9 +157,19 @@ class StreamingService : Service() {
 
     private val binder = object : IStreamingService.Stub() {
         override fun setPreviewSurface(surface: Surface?) {
-            renderer?.removeOutputSurface(previewSurface)
+            // Skip if surface hasn't changed
+            if (surface == previewSurface) return
+
+            // Remove old surface
+            if (previewSurface != null) {
+                renderer?.removeOutputSurface(previewSurface)
+            }
             previewSurface = surface
-            renderer?.addOutputSurface(previewSurface)
+
+            // Add new surface if valid
+            if (surface != null && surface.isValid) {
+                renderer?.addOutputSurface(surface)
+            }
         }
 
         override fun startStreaming(config: StreamingConfiguration) {
@@ -259,7 +315,7 @@ class StreamingService : Service() {
     private fun setupEncoders() {
         // Hardcode H.264 video format optimized for ultra-low latency
         val videoMediaFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, 1920, 1080).apply {
-            val initialBitrate = 2000000
+            val initialBitrate = 2000000  // 2 Mbps initial, adjusted dynamically by GCC
             setInteger(MediaFormat.KEY_BIT_RATE, initialBitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, 30)
             lastBitrate = initialBitrate
@@ -267,15 +323,15 @@ class StreamingService : Service() {
             // Ultra-low latency settings
             setInteger(MediaFormat.KEY_CAPTURE_RATE, 30)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 5)
-//            setInteger(MediaFormat.KEY_BITRATE_MODE, 2) // CBR mode (2 = BITRATE_MODE_CBR) for consistent latency
+//            setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR) // CBR not supported by all HW encoders
 
             // Disable B-frames for lower latency (P-frames only)
 //            setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
 
             // Real-time priority and low-latency flags (Android 30+)
             setInteger(MediaFormat.KEY_PRIORITY, 0) // Real-time priority (0 = real-time, 1 = non-real-time)
-            setInteger(MediaFormat.KEY_LATENCY, 0) // Ultra-low latency mode
-            setInteger(MediaFormat.KEY_OPERATING_RATE, 30) // Set high operating rate for real-time
+            setInteger(MediaFormat.KEY_LATENCY, 1) // Output after 1 frame queued (no buffering)
+            setInteger(MediaFormat.KEY_OPERATING_RATE, 60) // Higher than frame rate for headroom
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 setInteger(
                     MediaFormat.KEY_LOW_LATENCY,
@@ -283,10 +339,10 @@ class StreamingService : Service() {
                 ) // Enable low-latency mode (1 = enabled, 0 = disabled)
             }
 
-            setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline) // Baseline profile for ultra-low latency) // Baseline profile for ultra-low latency
-            setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel4) // Level 4 for ultra-low latency
+            setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline) // Baseline for max performance
+            setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel4)
         }
-        
+
         // Hardcode Opus audio format optimized for low latency
         val audioMediaFormat = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, 48000, 1).apply {
             setInteger(MediaFormat.KEY_BIT_RATE, 64000)
@@ -325,6 +381,8 @@ class StreamingService : Service() {
         queue = Executors.newSingleThreadExecutor()
 
         var initialTimestamp: Long = 0
+        var frameCount = 0
+        var lastFrameTime: Long = 0
 
         videoEncoder = MediaCodec.createByCodecName(
             MediaCodecList(MediaCodecList.REGULAR_CODECS).findEncoderForFormat(videoMediaFormat)
@@ -333,7 +391,7 @@ class StreamingService : Service() {
 
             setCallback(object : MediaCodec.Callback() {
                 override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {
-                    Log.i("StreamingService", "Encoder input buffer available")
+                    // Input buffers handled by Surface input
                 }
 
                 override fun onOutputBufferAvailable(
@@ -352,16 +410,32 @@ class StreamingService : Service() {
 
                     // Process immediately for ultra-low latency (no queuing)
                     try {
-                        val targetBitrate = whipSink?.writeH264(array, ts) ?: 0
+                        val gccTargetBitrate = whipSink?.writeH264(array, ts) ?: 0
 
-                        // Update encoder bitrate if changed significantly (>10% difference)
-                        if (targetBitrate > 0 && kotlin.math.abs(targetBitrate - lastBitrate) > lastBitrate * 0.1) {
-                            videoEncoder?.let { encoder ->
-                                val params = Bundle()
-                                params.putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, targetBitrate)
-                                encoder.setParameters(params)
-                                Log.d("StreamingService", "Updated encoder bitrate to $targetBitrate bps")
-                                lastBitrate = targetBitrate
+                        frameCount++
+                        val now = System.nanoTime()
+                        val interFrameMs = if (lastFrameTime > 0) (now - lastFrameTime) / 1_000_000 else 0
+                        lastFrameTime = now
+
+                        // Log timing every 90 frames (~3 sec at 30fps)
+                        if (frameCount % 90 == 0) {
+                            val effectiveFps = if (interFrameMs > 0) 1000.0 / interFrameMs else 0.0
+                            Log.i("StreamingService", "Encoder: frame=$frameCount, ${String.format("%.1f", effectiveFps)}fps, ${array.size/1024}KB")
+                        }
+
+                        // Update encoder bitrate if changed significantly (>5% difference)
+                        // Leave 25% headroom for FEC overhead (per RFC 8854 recommendations)
+                        if (gccTargetBitrate > 0) {
+                            val encoderBitrate = (gccTargetBitrate * 0.75).toInt()
+                            val diff = kotlin.math.abs(encoderBitrate - lastBitrate)
+                            if (diff > lastBitrate * 0.05) {
+                                videoEncoder?.let { encoder ->
+                                    val params = Bundle()
+                                    params.putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, encoderBitrate)
+                                    encoder.setParameters(params)
+                                    Log.i("StreamingService", "Bitrate: GCC=${gccTargetBitrate/1000}Kbps -> Encoder=${encoderBitrate/1000}Kbps (75% for FEC headroom)")
+                                    lastBitrate = encoderBitrate
+                                }
                             }
                         }
 
@@ -369,8 +443,12 @@ class StreamingService : Service() {
                         updateFpsTracking()
                     } catch (e: Exception) {
                         Log.e("StreamingService", "Error writing H264 data: ${e.message}")
-                    } finally {
+                    }
+
+                    try {
                         codec.releaseOutputBuffer(index, false)
+                    } catch (e: IllegalStateException) {
+                        // Codec was stopped, ignore
                     }
                 }
 
@@ -405,26 +483,35 @@ class StreamingService : Service() {
 
             setCallback(object : MediaCodec.Callback() {
                 override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {
+                    try {
+                        // Get latest audio data (non-blocking)
+                        val audioData = latestAudioData.getAndSet(null)
+                        if (audioData == null) {
+                            // No data available, queue empty buffer
+                            codec.queueInputBuffer(index, 0, 0, 0, 0)
+                            return
+                        }
 
-                    // Check if we have UAC audio data queued
-                    val uacAudioData = uacAudioQueue.take()
-                    val buffer = codec.getInputBuffer(index) ?: return
-                    buffer.clear()
+                        val buffer = codec.getInputBuffer(index) ?: return
+                        buffer.clear()
 
-                    val dataSize = minOf(uacAudioData.size, buffer.capacity())
-                    buffer.put(uacAudioData, 0, dataSize)
+                        val dataSize = minOf(audioData.size, buffer.capacity())
+                        buffer.put(audioData, 0, dataSize)
 
-                    // Calculate timestamp for this UAC audio buffer
-                    val sampleRate = 48000
-                    val samplesInBuffer = dataSize / 2 // 16-bit PCM
-                    val timestampUs = if (streamStartTimeNanos > 0) {
-                        val elapsedNanos = ((audioSampleCount - samplesInBuffer) * 1_000_000_000L) / sampleRate
-                        elapsedNanos / 1000 // Relative time from start
-                    } else {
-                        0L // Start from 0
+                        // Calculate timestamp for this audio buffer
+                        val sampleRate = 48000
+                        val samplesInBuffer = dataSize / 2 // 16-bit PCM
+                        val timestampUs = if (streamStartTimeNanos > 0) {
+                            val elapsedNanos = ((audioSampleCount - samplesInBuffer) * 1_000_000_000L) / sampleRate
+                            elapsedNanos / 1000 // Relative time from start
+                        } else {
+                            0L // Start from 0
+                        }
+
+                        codec.queueInputBuffer(index, 0, dataSize, timestampUs, 0)
+                    } catch (e: IllegalStateException) {
+                        // Encoder is stopping, ignore
                     }
-
-                    codec.queueInputBuffer(index, 0, dataSize, timestampUs, 0)
                 }
 
                 override fun onOutputBufferAvailable(
@@ -432,17 +519,21 @@ class StreamingService : Service() {
                     index: Int,
                     info: MediaCodec.BufferInfo
                 ) {
-                    val buffer = codec.getOutputBuffer(index) ?: return
-                    val array = ByteArray(info.size)
-                    buffer.get(array, info.offset, info.size)
-
-                    // Process immediately for ultra-low latency (no queuing)
                     try {
-                        whipSink?.writeOpus(array, info.presentationTimeUs)
-                    } catch (e: Exception) {
-                        Log.e("StreamingService", "Error writing Opus data: ${e.message}", e)
-                    } finally {
+                        val buffer = codec.getOutputBuffer(index) ?: return
+                        val array = ByteArray(info.size)
+                        buffer.get(array, info.offset, info.size)
+
+                        // Process immediately for ultra-low latency (no queuing)
+                        try {
+                            whipSink?.writeOpus(array, info.presentationTimeUs)
+                        } catch (e: Exception) {
+                            Log.e("StreamingService", "Error writing Opus data: ${e.message}", e)
+                        }
+
                         codec.releaseOutputBuffer(index, false)
+                    } catch (e: IllegalStateException) {
+                        // Encoder is stopping, ignore
                     }
                 }
 
@@ -516,8 +607,8 @@ class StreamingService : Service() {
     }
     
     
-    // Queue to hold UAC audio data for the encoder callback
-    private val uacAudioQueue = LinkedBlockingDeque<ByteArray>()
+    // Holds latest audio data for the encoder callback (replaces previous value to avoid backup)
+    private val latestAudioData = AtomicReference<ByteArray?>(null)
 
     private fun feedAudioDataToEncoder(audioData: ByteArray) {
         // Calculate timestamp based on sample count
@@ -550,8 +641,8 @@ class StreamingService : Service() {
         // Calculate audio levels for visualizer
         calculateAndSendAudioLevels(audioData)
         
-        // Queue the audio data for processing by the encoder callback
-        uacAudioQueue.put(audioData)
+        // Store latest audio data for the encoder callback (overwrites previous)
+        latestAudioData.set(audioData)
     }
 
     private fun calculateAndSendAudioLevels(audioData: ByteArray) {
@@ -636,6 +727,15 @@ class StreamingService : Service() {
             acquire()
         }
 
+        // Acquire WiFi lock to keep WiFi in high-performance mode when screen is off
+        val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        wifiLock = wifiManager.createWifiLock(
+            WifiManager.WIFI_MODE_FULL_HIGH_PERF,
+            "KineticStreamer::WifiLock"
+        ).apply {
+            acquire()
+        }
+
         // Initialize settings
         val dataStore = DataStoreProvider.getDataStore(this)
         settings = Settings(dataStore)
@@ -657,13 +757,20 @@ class StreamingService : Service() {
         ) ?: false
 
         // Set up the video flow - runs continuously for preview
-        deviceFlowJob = settings!!.selectedVideoDevice.map { identifier ->
+        // Combine with deviceRefreshTrigger to allow USB reconnection
+        deviceFlowJob = combine(
+            settings!!.selectedVideoDevice,
+            deviceRefreshTrigger.onStart { emit(Unit) } // Emit initial value to start flow
+        ) { identifier, _ -> identifier }
+        .map { identifier ->
             if (identifier == null) return@map null
             val usbManager = this.getSystemService(USB_SERVICE) as UsbManager
             val device = VideoSourceDevice.fromIdentifier(identifier, usbManager.deviceList.values.toList())
             if (device != null) {
+                Log.i("StreamingService", "USB device found: ${device}")
                 return@map device
             }
+            Log.w("StreamingService", "USB device not found, falling back to camera")
             val cameraManager = getSystemService(CAMERA_SERVICE) as CameraManager
             val defaultDevice = cameraManager.cameraIdList.firstOrNull()
             if (defaultDevice != null) {
@@ -674,9 +781,12 @@ class StreamingService : Service() {
         }
         .flowOn(Dispatchers.IO) // Process video on IO dispatcher (blocking on frame reads)
         .flatMapLatest { device ->
+            Log.i("StreamingService", "flatMapLatest received device: $device")
             // if the device is UsbDevice, request permissions
             if (device is VideoSourceDevice.UsbCamera) {
+                Log.i("StreamingService", "Requesting USB camera permission...")
                 val granted = device.requestPermission(this)
+                Log.i("StreamingService", "USB camera permission granted: $granted")
                 if (!granted) {
                     return@flatMapLatest emptyFlow()
                 }
@@ -686,6 +796,7 @@ class StreamingService : Service() {
                     return@flatMapLatest emptyFlow()
                 }
             } else if (device == null) {
+                Log.i("StreamingService", "Device is null, returning empty flow")
                 return@flatMapLatest emptyFlow()
             }
             if (ActivityCompat.checkSelfPermission(
@@ -693,10 +804,13 @@ class StreamingService : Service() {
                     Manifest.permission.CAMERA
                 ) != PackageManager.PERMISSION_GRANTED
             ) {
+                Log.i("StreamingService", "Camera permission not granted")
                 return@flatMapLatest emptyFlow()
             }
+            Log.i("StreamingService", "Creating VideoSource for device: $device")
             VideoSource(this, device)
         }
+        .buffer(Channel.CONFLATED) // Only keep latest frame to minimize latency
         .onEach { surfaceTexture ->
             // Capture the SurfaceTexture timestamp for synchronization (only if streaming)
             val frameTimestampNanos = surfaceTexture.timestamp
@@ -717,11 +831,12 @@ class StreamingService : Service() {
         audioFlowJob =
             // Monitor the selected audio device
             settings!!.selectedAudioDevice
-            .flowOn(Dispatchers.IO) // Process video on IO dispatcher (blocking on frame reads)
+            .flowOn(Dispatchers.IO) // Process audio on IO dispatcher
             .flatMapLatest { deviceId ->
                 Log.i("StreamingService", "Using selected audio device ID: $deviceId")
                 AudioSource(this, deviceId)
             }
+            .buffer(Channel.CONFLATED) // Only keep latest audio to minimize latency
             .onEach { audioData ->
                 // Only feed to encoder if streaming
                 if (audioEncoder != null) {
@@ -804,6 +919,9 @@ class StreamingService : Service() {
                     }
                 }
             }
+        } else if (intent?.action == ACTION_USB_DEVICE_CHANGED) {
+            Log.i("StreamingService", "USB device changed, triggering device refresh")
+            deviceRefreshTrigger.tryEmit(Unit)
         }
         return START_STICKY
     }
@@ -814,7 +932,11 @@ class StreamingService : Service() {
         // Release wake lock
         wakeLock?.release()
         wakeLock = null
-        
+
+        // Release WiFi lock
+        wifiLock?.release()
+        wifiLock = null
+
         // Cancel the device flow job
         deviceFlowJob?.cancel()
         deviceFlowJob = null

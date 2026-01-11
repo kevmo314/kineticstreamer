@@ -14,6 +14,7 @@ ANDROID_NDK=/home/kevin/android-ndk-r26d
 ANDROID_API=24
 ANDROID_PLATFORM=android-$ANDROID_API
 CMAKE_C_FLAGS="-fPIC"
+CMAKE_SHARED_LINKER_FLAGS="-Wl,-z,max-page-size=16384"
 CMAKE_MAKE_PROGRAM=ninja
 GOMOBILE_COMMAND=gomobile
 CMAKE_COMMAND=cmake
@@ -54,6 +55,7 @@ build_arch() {
               -DANDROID_NDK=$ANDROID_NDK \
               -DCMAKE_C_FLAGS="$CMAKE_C_FLAGS" \
               -DCMAKE_CXX_FLAGS="$CMAKE_C_FLAGS" \
+              -DCMAKE_SHARED_LINKER_FLAGS="$CMAKE_SHARED_LINKER_FLAGS" \
               -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
               -DCMAKE_MAKE_PROGRAM=$CMAKE_MAKE_PROGRAM \
               -GNinja \
@@ -71,7 +73,7 @@ build_arch() {
 
 # Export variables and function for parallel execution
 export -f build_arch
-export ANDROID_NDK ANDROID_API ANDROID_PLATFORM CMAKE_C_FLAGS CMAKE_MAKE_PROGRAM CMAKE_COMMAND
+export ANDROID_NDK ANDROID_API ANDROID_PLATFORM CMAKE_C_FLAGS CMAKE_SHARED_LINKER_FLAGS CMAKE_MAKE_PROGRAM CMAKE_COMMAND
 export CC CXX CCACHE_DIR CCACHE_MAXSIZE
 
 # Build all architectures in parallel
@@ -112,10 +114,12 @@ fi
 echo "Cleaning up build directories..."
 rm -rf third_party/build
 
-# Copy libraries to jniLibs
+# Copy libraries to jniLibs (only the main shared libraries, not engine modules)
 echo "Copying libraries to jniLibs..."
 for abi in arm64-v8a armeabi-v7a x86 x86_64; do
-    cp -r third_party/output/$abi/lib ../jniLibs/$abi
+    mkdir -p ../jniLibs/$abi
+    # Only copy the main .so files, skip subdirectories like engines-3 and ossl-modules
+    cp third_party/output/$abi/lib/*.so ../jniLibs/$abi/ 2>/dev/null || true
 done
 
 echo "Build completed successfully!"

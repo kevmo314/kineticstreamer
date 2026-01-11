@@ -180,6 +180,32 @@ fun SettingsScreen(
                     modifier = Modifier.fillMaxWidth()
                 )
             }
+            Divider()
+
+            Text("Behavior", modifier = Modifier.padding(16.dp))
+
+            val autoOpen = settings.autoOpenOnUsbCamera.collectAsState(initial = false)
+
+            Surface(onClick = {
+                runBlocking { settings.setAutoOpenOnUsbCamera(!autoOpen.value) }
+            }) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Checkbox(checked = autoOpen.value, onCheckedChange = {
+                        runBlocking { settings.setAutoOpenOnUsbCamera(it) }
+                    })
+                    Column(modifier = Modifier.padding(start = 8.dp)) {
+                        Text("Auto-open on USB camera")
+                        Text(
+                            "Open app when a UVC camera is plugged in",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
         }
     }
 }

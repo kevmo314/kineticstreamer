@@ -85,7 +85,7 @@ build_arch() {
     # -checklinkname=0 is needed for Go 1.24+ compatibility with anet package
     cd cmd/jni
     go build -buildmode=c-shared \
-        -ldflags="-s -w -checklinkname=0 -extldflags '-Wl,-soname,libkinetic.so'" \
+        -ldflags="-s -w -checklinkname=0 -extldflags '-Wl,-soname,libkinetic.so -Wl,-z,max-page-size=16384'" \
         -o "$OUTPUT_DIR/$ARCH/libkinetic.so" \
         .
     cd ../..

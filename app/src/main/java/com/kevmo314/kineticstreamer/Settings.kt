@@ -6,6 +6,7 @@ import android.os.Build
 import androidx.annotation.RequiresApi
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
@@ -70,6 +71,7 @@ class Settings(private val dataStore: DataStore<Preferences>) {
     private val _recordingMaxCapacityBytes = longPreferencesKey("recording_max_capacity_bytes")
     private val _selectedVideoDevice = stringPreferencesKey("selected_video_device")
     private val _selectedAudioDevice = intPreferencesKey("selected_audio_device_id")
+    private val _autoOpenOnUsbCamera = booleanPreferencesKey("auto_open_on_usb_camera")
 
     val codec = dataStore.data
          .map { SupportedVideoCodec.valueOf(it[_codec] ?: SupportedVideoCodec.H264.name) }
@@ -134,6 +136,12 @@ class Settings(private val dataStore: DataStore<Preferences>) {
                 it.remove(_selectedAudioDevice)
             }
         }
+    }
+
+    val autoOpenOnUsbCamera = dataStore.data.map { it[_autoOpenOnUsbCamera] ?: false }
+
+    suspend fun setAutoOpenOnUsbCamera(enabled: Boolean) {
+        dataStore.edit { it[_autoOpenOnUsbCamera] = enabled }
     }
 
     suspend fun getStreamingConfiguration(): StreamingConfiguration {

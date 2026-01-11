@@ -63,11 +63,32 @@ class WebViewOverlay(private val context: Context) {
      * Initialize using SurfaceControl for hardware acceleration (Android 10+)
      */
     private fun initializeWithSurfaceControl(url: String): Boolean {
+        // If already on main thread, run directly to avoid deadlock
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return initializeOnMainThread(url)
+        }
+
+        // Otherwise, post to main thread and wait
         var success = false
         val latch = java.util.concurrent.CountDownLatch(1)
 
         mainHandler.post {
-            try {
+            success = initializeOnMainThread(url)
+            latch.countDown()
+        }
+
+        try {
+            latch.await(5, java.util.concurrent.TimeUnit.SECONDS)
+        } catch (e: InterruptedException) {
+            Log.e(TAG, "Initialization timeout", e)
+            return false
+        }
+
+        return success
+    }
+
+    private fun initializeOnMainThread(url: String): Boolean {
+        try {
                 // Create container for WebView
                 containerView = FrameLayout(context).apply {
                     layoutParams = FrameLayout.LayoutParams(overlayWidth, overlayHeight)
@@ -167,30 +188,17 @@ class WebViewOverlay(private val context: Context) {
                 surfaceCapture?.initialize(overlayWidth, overlayHeight, context)
                 Log.i(TAG, "Surface capture initialized, textureId=${surfaceCapture?.getTextureId()}")
 
-                success = true
                 Log.i(TAG, "Initialized with SurfaceControl for hardware acceleration")
 
                 // Ensure the SurfaceTexture is available and update the renderer
                 updateRendererOverlay()
 
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to initialize with SurfaceControl", e)
-                success = false
-                cleanup()
-            } finally {
-                latch.countDown()
-            }
-        }
-
-        // Wait for initialization to complete
-        try {
-            latch.await(5, java.util.concurrent.TimeUnit.SECONDS)
-        } catch (e: InterruptedException) {
-            Log.e(TAG, "Initialization timeout", e)
+            return true
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to initialize with SurfaceControl", e)
+            cleanup()
             return false
         }
-
-        return success
     }
 
     /**

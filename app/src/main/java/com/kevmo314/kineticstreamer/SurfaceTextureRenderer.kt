@@ -276,8 +276,11 @@ class SurfaceTextureRenderer {
                 return
             }
 
-            // Log surface info
-            Log.i(TAG, "Adding output surface: $surface, isValid=${surface.isValid}")
+            // Validate surface before creating EGL surface
+            if (!surface.isValid) {
+                Log.w(TAG, "Surface is not valid, skipping")
+                return
+            }
 
             // Create EGL surface for this output
             val eglSurface = EGL14.eglCreateWindowSurface(

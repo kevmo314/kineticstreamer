@@ -10,8 +10,10 @@ import android.view.SurfaceView
 import android.view.ViewGroup
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeGesturesPadding
 import androidx.compose.foundation.layout.size
@@ -124,8 +126,14 @@ fun MainScreen(
                 }
 
                 Box(modifier = Modifier.fillMaxSize()) {
+                    // Fit within screen maintaining 16:9 aspect ratio (letterbox/pillarbox)
+                    val videoAspectRatio = 16f / 9f
+
                     AndroidView(
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .fillMaxWidth()
+                            .aspectRatio(videoAspectRatio),
                         factory = { context ->
                             SurfaceView(context).apply {
                                 layoutParams = ViewGroup.LayoutParams(
@@ -138,8 +146,6 @@ fun MainScreen(
                                     override fun surfaceCreated(holder: SurfaceHolder) {
                                         val frame = holder.surfaceFrame
                                         Log.i("KineticStreamer", "surfaceCreated: frame=${frame.width()}x${frame.height()}, surface=${holder.surface}")
-                                        Log.i("KineticStreamer", "SurfaceView size: ${this@apply.width}x${this@apply.height}")
-                                        Log.i("KineticStreamer", "SurfaceView measuredSize: ${this@apply.measuredWidth}x${this@apply.measuredHeight}")
                                         // Store surface - LaunchedEffect will set it on the service
                                         previewSurface.value = holder.surface
                                     }
@@ -150,8 +156,7 @@ fun MainScreen(
                                         width: Int,
                                         height: Int
                                     ) {
-                                        val frame = holder.surfaceFrame
-                                        Log.i("KineticStreamer", "surfaceChanged: ${width}x${height} format=$format, frame=${frame.width()}x${frame.height()}")
+                                        Log.i("KineticStreamer", "surfaceChanged: ${width}x${height} format=$format")
                                     }
 
                                     override fun surfaceDestroyed(holder: SurfaceHolder) {
@@ -163,14 +168,20 @@ fun MainScreen(
                         },
                     )
                     
-                    // Bitrate and FPS display in top left
-                    if (isStreaming.value && (currentBitrate.intValue > 0 || currentFps.value > 0)) {
-                        Column(
-                            modifier = Modifier
-                                .align(Alignment.TopStart)
-                                .padding(16.dp)
-                                .safeGesturesPadding()
-                        ) {
+                    // Top left: Audio meter, Bitrate, and FPS
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(16.dp)
+                            .safeGesturesPadding()
+                    ) {
+                        // Audio visualizer
+                        AudioVisualizerView(
+                            audioLevels = audioLevels.value,
+                            barColor = Color.Green,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
+                        if (isStreaming.value && (currentBitrate.intValue > 0 || currentFps.value > 0)) {
                             if (currentBitrate.intValue > 0) {
                                 Text(
                                     text = "${currentBitrate.intValue / 1000} Kbps",
@@ -190,75 +201,70 @@ fun MainScreen(
                         }
                     }
 
+                    // Right side controls - vertically centered
                     Column(
                         horizontalAlignment = Alignment.End,
-                        verticalArrangement = Arrangement.SpaceBetween,
+                        verticalArrangement = Arrangement.Center,
                         modifier = Modifier
                             .fillMaxSize()
-                            .safeGesturesPadding(),
+                            .safeGesturesPadding()
+                            .padding(end = 16.dp),
                     ) {
-                    // Top controls
-                    Column(
-                        horizontalAlignment = Alignment.End,
-                        verticalArrangement = Arrangement.spacedBy(16.dp),
-                    ) {
-                    IconButton(
-                        modifier = Modifier.size(64.dp).padding(16.dp),
-                        onClick = {
-                            // show camera selector dialog
-                            cameraSelectorDialogOpen.value = true
-                        },
-                    ) {
-                        Icon(
-                            Icons.Filled.Cameraswitch,
-                            contentDescription = "Switch camera",
-                            modifier = Modifier.fillMaxSize(),
-                            tint = Color.White,
-                        )
-                    }
-                    Button(
-                        onClick = {
-                            if (isStreaming.value) {
-                                stub.stopStreaming()
-                                isStreaming.value = false
-                            } else {
-                                runBlocking {
-                                    stub.startStreaming(settings.getStreamingConfiguration())
-                                    isStreaming.value = true
-                                }
+                        Column(
+                            horizontalAlignment = Alignment.End,
+                            verticalArrangement = Arrangement.spacedBy(16.dp),
+                        ) {
+                            IconButton(
+                                modifier = Modifier.size(64.dp).padding(16.dp),
+                                onClick = {
+                                    // show camera selector dialog
+                                    cameraSelectorDialogOpen.value = true
+                                },
+                            ) {
+                                Icon(
+                                    Icons.Filled.Cameraswitch,
+                                    contentDescription = "Switch camera",
+                                    modifier = Modifier.fillMaxSize(),
+                                    tint = Color.White,
+                                )
                             }
-                        },
-                        modifier = Modifier.size(64.dp),
-                        shape = if (isStreaming.value) {
-                            RoundedCornerShape(2.dp)
-                        } else {
-                            CircleShape
-                        },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (isStreaming.value) Color.Green else Color.Red
-                        ),
-                    ) {
-                    }
-                    IconButton(
-                        modifier = Modifier.size(64.dp).padding(16.dp),
-                        onClick = {
-                            navigateToSettings()
-                        },
-                    ) {
-                        Icon(
-                            Icons.Filled.Settings,
-                            contentDescription = "Settings",
-                            modifier = Modifier.fillMaxSize(),
-                            tint = Color.White,
-                        )
-                    }
-                    }
-                    
-                    // Audio visualizer at bottom
-                    AudioVisualizerView(
-                        audioLevels = audioLevels.value,
-                        modifier = Modifier.padding(16.dp)
-                    )
+                            Button(
+                                onClick = {
+                                    if (isStreaming.value) {
+                                        stub.stopStreaming()
+                                        isStreaming.value = false
+                                    } else {
+                                        runBlocking {
+                                            stub.startStreaming(settings.getStreamingConfiguration())
+                                            isStreaming.value = true
+                                        }
+                                    }
+                                },
+                                modifier = Modifier.size(64.dp),
+                                shape = if (isStreaming.value) {
+                                    RoundedCornerShape(2.dp)
+                                } else {
+                                    CircleShape
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (isStreaming.value) Color.Green else Color.Red
+                                ),
+                            ) {
+                            }
+                            IconButton(
+                                modifier = Modifier.size(64.dp).padding(16.dp),
+                                onClick = {
+                                    navigateToSettings()
+                                },
+                            ) {
+                                Icon(
+                                    Icons.Filled.Settings,
+                                    contentDescription = "Settings",
+                                    modifier = Modifier.fillMaxSize(),
+                                    tint = Color.White,
+                                )
+                            }
+                        }
                     }
                 }
 

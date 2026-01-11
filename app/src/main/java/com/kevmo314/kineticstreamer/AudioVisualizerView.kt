@@ -1,11 +1,7 @@
 package com.kevmo314.kineticstreamer
 
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -13,7 +9,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -26,8 +21,7 @@ fun AudioVisualizerView(
     audioLevels: List<Float> = emptyList(),
     modifier: Modifier = Modifier,
     barCount: Int = 12,
-    barColor: Color = Color.White,
-    backgroundColor: Color = Color.Black.copy(alpha = 0.6f)
+    barColor: Color = Color.White
 ) {
     var displayLevels by remember { mutableStateOf(List(barCount) { 0f }) }
 
@@ -62,17 +56,10 @@ fun AudioVisualizerView(
         }
     }
 
-    Box(
-        modifier = modifier
-            .size(150.dp, 40.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .background(backgroundColor)
+    Canvas(
+        modifier = modifier.size(150.dp, 40.dp)
     ) {
-        Canvas(
-            modifier = Modifier.size(150.dp, 40.dp)
-        ) {
-            drawAudioBars(displayLevels, barColor)
-        }
+        drawAudioBars(displayLevels, barColor)
     }
 }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/pion/interceptor"
 	"github.com/pion/interceptor/pkg/cc"
 	"github.com/pion/interceptor/pkg/gcc"
+	"github.com/pion/interceptor/pkg/nack"
 	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 	"github.com/pion/rtp/codecs"
@@ -46,6 +47,31 @@ type whipTrack struct {
 	clockRate       uint32
 	ssrc            uint32
 	payloadType     uint8
+}
+
+const (
+	// Playout delay RTP header extension URI
+	playoutDelayExtensionURI = "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay"
+	// Extension ID to use (must match what's negotiated in SDP)
+	playoutDelayExtensionID = 6
+	// Playout delay values in 10ms units (100 = 1000ms = 1s)
+	minPlayoutDelay = 100 // 1 second
+	maxPlayoutDelay = 100 // 1 second
+)
+
+// addPlayoutDelayExtension adds the playout delay header extension to an RTP packet
+func addPlayoutDelayExtension(pkt *rtp.Packet) {
+	ext := rtp.PlayoutDelayExtension{
+		MinDelay: minPlayoutDelay,
+		MaxDelay: maxPlayoutDelay,
+	}
+	payload, err := ext.Marshal()
+	if err != nil {
+		return
+	}
+	pkt.Header.Extension = true
+	pkt.Header.ExtensionProfile = 0xBEDE // One-byte header extension
+	pkt.Header.SetExtension(playoutDelayExtensionID, payload)
 }
 
 func NewWHIPSink(url, bearerToken, encodedMediaFormatMimeTypes string) (*WHIPSink, error) {
@@ -90,7 +116,30 @@ func (s *WHIPSink) connect() error {
 		return err
 	}
 
+	// Register playout delay header extension for video
+	if err := m.RegisterHeaderExtension(
+		webrtc.RTPHeaderExtensionCapability{URI: playoutDelayExtensionURI},
+		webrtc.RTPCodecTypeVideo,
+		webrtc.RTPTransceiverDirectionSendonly,
+	); err != nil {
+		log.Printf("Warning: failed to register playout delay extension: %v", err)
+	}
+
 	i := &interceptor.Registry{}
+
+	// Add NACK generator for packet retransmission (part of FEC strategy)
+	generatorFactory, err := nack.NewGeneratorInterceptor()
+	if err != nil {
+		return err
+	}
+	i.Add(generatorFactory)
+
+	// Add NACK responder to handle retransmission requests
+	responderFactory, err := nack.NewResponderInterceptor()
+	if err != nil {
+		return err
+	}
+	i.Add(responderFactory)
 
 	// Create congestion controller with Google Congestion Control
 	// Initial bitrate: 1 Mbps
@@ -402,6 +451,7 @@ func (s *WHIPSink) WriteH264(buf []byte, ptsMicroseconds int64) (int, error) {
 				packets := videoTrack.packetizer.(rtp.Packetizer).Packetize(videoTrack.sps, 0)
 				for _, pkt := range packets {
 					pkt.Header.Timestamp = rtpTimestamp
+					addPlayoutDelayExtension(pkt)
 					if err := videoTrack.track.WriteRTP(pkt); err != nil {
 						return 0, fmt.Errorf("error writing SPS RTP: %v", err)
 					}
@@ -413,6 +463,7 @@ func (s *WHIPSink) WriteH264(buf []byte, ptsMicroseconds int64) (int, error) {
 				packets := videoTrack.packetizer.(rtp.Packetizer).Packetize(videoTrack.pps, 0)
 				for _, pkt := range packets {
 					pkt.Header.Timestamp = rtpTimestamp
+					addPlayoutDelayExtension(pkt)
 					if err := videoTrack.track.WriteRTP(pkt); err != nil {
 						return 0, fmt.Errorf("error writing PPS RTP: %v", err)
 					}
@@ -428,6 +479,7 @@ func (s *WHIPSink) WriteH264(buf []byte, ptsMicroseconds int64) (int, error) {
 		// Override timestamp to use our absolute timestamp
 		for _, pkt := range packets {
 			pkt.Header.Timestamp = rtpTimestamp
+			addPlayoutDelayExtension(pkt)
 			if err := videoTrack.track.WriteRTP(pkt); err != nil {
 				return 0, fmt.Errorf("error writing RTP packet: %v", err)
 			}
