@@ -1,7 +1,9 @@
 package main
 
 // #include <stdint.h>
+// #include <stdlib.h>
 // void GoWHIPOnPLI(int64_t handle);
+// void GoSRTOnPLI(int64_t handle);
 import "C"
 import (
 	"log"
@@ -104,6 +106,37 @@ func GoSRTSinkClose(handle int64) {
 		delete(srtSinks, handle)
 	}
 	mu.Unlock()
+}
+
+//export GoSRTSinkGetBandwidth
+func GoSRTSinkGetBandwidth(handle int64) int64 {
+	mu.Lock()
+	sink, ok := srtSinks[handle]
+	mu.Unlock()
+
+	if !ok {
+		return 0
+	}
+
+	return sink.GetStatsAndBandwidth()
+}
+
+//export GoSRTSinkSetPLICallback
+func GoSRTSinkSetPLICallback(handle int64) {
+	mu.Lock()
+	sink, ok := srtSinks[handle]
+	if ok {
+		sink.SetPLICallback(&srtPLICallbackWrapper{handle: handle})
+	}
+	mu.Unlock()
+}
+
+type srtPLICallbackWrapper struct {
+	handle int64
+}
+
+func (w *srtPLICallbackWrapper) OnPLI() {
+	C.GoSRTOnPLI(C.int64_t(w.handle))
 }
 
 //export GoCreateUVCSource
@@ -229,11 +262,15 @@ func GoCreateWHIPSink(urlStr, tokenStr, mimeTypesStr *C.char) (handle int64) {
 	url := C.GoString(urlStr)
 	token := C.GoString(tokenStr)
 	mimeTypes := C.GoString(mimeTypesStr)
-	
+
+	log.Printf("WHIP: creating sink url=%s mimeTypes=%s", url, mimeTypes)
+
 	sink, err := kinetic.NewWHIPSink(url, token, mimeTypes)
 	if err != nil {
+		log.Printf("WHIP: failed to create sink: %v", err)
 		return 0
 	}
+	log.Printf("WHIP: sink created successfully")
 	
 	mu.Lock()
 	handle = nextHandle
@@ -322,4 +359,30 @@ func GoWHIPSinkClose(handle int64) {
 		delete(whipSinks, handle)
 	}
 	mu.Unlock()
+}
+
+//export GoWHIPSinkGetICEConnectionState
+func GoWHIPSinkGetICEConnectionState(handle int64) *C.char {
+	mu.RLock()
+	sink, ok := whipSinks[handle]
+	mu.RUnlock()
+
+	if !ok {
+		return C.CString("unknown")
+	}
+
+	return C.CString(sink.GetICEConnectionState())
+}
+
+//export GoWHIPSinkGetPeerConnectionState
+func GoWHIPSinkGetPeerConnectionState(handle int64) *C.char {
+	mu.RLock()
+	sink, ok := whipSinks[handle]
+	mu.RUnlock()
+
+	if !ok {
+		return C.CString("unknown")
+	}
+
+	return C.CString(sink.GetPeerConnectionState())
 }

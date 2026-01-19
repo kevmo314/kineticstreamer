@@ -10,6 +10,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -100,10 +101,14 @@ fun AddOutputScreen(
 @Composable
 fun AddWhipOutputScreen(
     onSave: (OutputConfiguration) -> Unit,
+    onDelete: (() -> Unit)? = null,
     navigateBack: () -> Unit,
+    initialUrl: String = "",
+    initialToken: String = "",
 ) {
-    val (url, setUrl) = remember { mutableStateOf("") }
-    val (bearerToken, setBearerToken) = remember { mutableStateOf("") }
+    val (url, setUrl) = remember { mutableStateOf(initialUrl) }
+    val (bearerToken, setBearerToken) = remember { mutableStateOf(initialToken) }
+    val isEditing = initialUrl.isNotEmpty()
 
     Scaffold(
         topBar = {
@@ -112,13 +117,21 @@ fun AddWhipOutputScreen(
                     containerColor = MaterialTheme.colorScheme.primaryContainer,
                     titleContentColor = MaterialTheme.colorScheme.primary,
                 ),
-                title = { Text("WHIP Output") },
+                title = { Text(if (isEditing) "Edit WHIP Output" else "WHIP Output") },
                 navigationIcon = {
                     IconButton(onClick = navigateBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
                 actions = {
+                    if (isEditing && onDelete != null) {
+                        IconButton(onClick = {
+                            onDelete()
+                            navigateBack()
+                        }) {
+                            Icon(Icons.Filled.Delete, contentDescription = "Delete")
+                        }
+                    }
                     IconButton(
                         onClick = {
                             if (url.isNotBlank()) {
@@ -174,11 +187,16 @@ fun AddWhipOutputScreen(
 @Composable
 fun AddSrtOutputScreen(
     onSave: (OutputConfiguration) -> Unit,
+    onDelete: (() -> Unit)? = null,
     navigateBack: () -> Unit,
+    initialHost: String = "",
+    initialPort: String = "9000",
+    initialStreamId: String = "",
 ) {
-    val (host, setHost) = remember { mutableStateOf("") }
-    val (port, setPort) = remember { mutableStateOf("9000") }
-    val (streamId, setStreamId) = remember { mutableStateOf("") }
+    val (host, setHost) = remember { mutableStateOf(initialHost) }
+    val (port, setPort) = remember { mutableStateOf(initialPort) }
+    val (streamId, setStreamId) = remember { mutableStateOf(initialStreamId) }
+    val isEditing = initialHost.isNotEmpty()
 
     Scaffold(
         topBar = {
@@ -187,13 +205,21 @@ fun AddSrtOutputScreen(
                     containerColor = MaterialTheme.colorScheme.primaryContainer,
                     titleContentColor = MaterialTheme.colorScheme.primary,
                 ),
-                title = { Text("SRT Output") },
+                title = { Text(if (isEditing) "Edit SRT Output" else "SRT Output") },
                 navigationIcon = {
                     IconButton(onClick = navigateBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
                 actions = {
+                    if (isEditing && onDelete != null) {
+                        IconButton(onClick = {
+                            onDelete()
+                            navigateBack()
+                        }) {
+                            Icon(Icons.Filled.Delete, contentDescription = "Delete")
+                        }
+                    }
                     IconButton(
                         onClick = {
                             if (host.isNotBlank()) {

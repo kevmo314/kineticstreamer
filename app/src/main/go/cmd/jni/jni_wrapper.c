@@ -33,6 +33,7 @@ void release_bytes(JNIEnv* env, jbyteArray arr, jbyte* bytes) {
 // Global references for PLI callbacks
 static JavaVM* g_jvm = NULL;
 static jobject g_whipPLICallbacks[100] = {NULL};
+static jobject g_srtPLICallbacks[100] = {NULL};
 
 // JNI wrapper functions
 JNIEXPORT void JNICALL
@@ -87,6 +88,52 @@ Java_com_kevmo314_kineticstreamer_kinetic_SRTSink_writeOpus(JNIEnv* env, jobject
 JNIEXPORT void JNICALL
 Java_com_kevmo314_kineticstreamer_kinetic_SRTSink_close(JNIEnv* env, jobject obj, jlong handle) {
     GoSRTSinkClose(handle);
+    // Clean up PLI callback if exists
+    if (handle < 100 && g_srtPLICallbacks[handle] != NULL) {
+        (*env)->DeleteGlobalRef(env, g_srtPLICallbacks[handle]);
+        g_srtPLICallbacks[handle] = NULL;
+    }
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_SRTSink_getBandwidth(JNIEnv* env, jobject obj, jlong handle) {
+    return GoSRTSinkGetBandwidth(handle);
+}
+
+JNIEXPORT void JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_SRTSink_setPLICallback(JNIEnv* env, jobject obj, jlong handle, jobject callback) {
+    if (handle >= 100) return;
+
+    // Store global reference to callback
+    if (g_srtPLICallbacks[handle] != NULL) {
+        (*env)->DeleteGlobalRef(env, g_srtPLICallbacks[handle]);
+    }
+    g_srtPLICallbacks[handle] = (*env)->NewGlobalRef(env, callback);
+
+    // Register with Go
+    GoSRTSinkSetPLICallback(handle);
+}
+
+// Called from Go when SRT detects packet loss
+void GoSRTOnPLI(int64_t handle) {
+    if (g_jvm == NULL || handle >= 100 || g_srtPLICallbacks[handle] == NULL) return;
+
+    JNIEnv* env;
+    int attached = 0;
+    if ((*g_jvm)->GetEnv(g_jvm, (void**)&env, JNI_VERSION_1_6) != JNI_OK) {
+        if ((*g_jvm)->AttachCurrentThread(g_jvm, &env, NULL) != JNI_OK) return;
+        attached = 1;
+    }
+
+    jclass cls = (*env)->GetObjectClass(env, g_srtPLICallbacks[handle]);
+    jmethodID method = (*env)->GetMethodID(env, cls, "onPLI", "()V");
+    if (method != NULL) {
+        (*env)->CallVoidMethod(env, g_srtPLICallbacks[handle], method);
+    }
+
+    if (attached) {
+        (*g_jvm)->DetachCurrentThread(g_jvm);
+    }
 }
 
 JNIEXPORT jlong JNICALL
@@ -193,15 +240,31 @@ Java_com_kevmo314_kineticstreamer_kinetic_WHIPSink_setPLICallback(JNIEnv* env, j
 // Called from Go when PLI is received
 void GoWHIPOnPLI(int64_t handle) {
     if (g_jvm == NULL || handle >= 100 || g_whipPLICallbacks[handle] == NULL) return;
-    
+
     JNIEnv* env;
     (*g_jvm)->AttachCurrentThread(g_jvm, &env, NULL);
-    
+
     jclass cls = (*env)->GetObjectClass(env, g_whipPLICallbacks[handle]);
     jmethodID mid = (*env)->GetMethodID(env, cls, "onPLI", "()V");
     if (mid != NULL) {
         (*env)->CallVoidMethod(env, g_whipPLICallbacks[handle], mid);
     }
-    
+
     (*g_jvm)->DetachCurrentThread(g_jvm);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_WHIPSink_getICEConnectionState(JNIEnv* env, jobject obj, jlong handle) {
+    char* state = GoWHIPSinkGetICEConnectionState(handle);
+    jstring result = (*env)->NewStringUTF(env, state);
+    free(state);  // Free the C string allocated by Go
+    return result;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_WHIPSink_getPeerConnectionState(JNIEnv* env, jobject obj, jlong handle) {
+    char* state = GoWHIPSinkGetPeerConnectionState(handle);
+    jstring result = (*env)->NewStringUTF(env, state);
+    free(state);  // Free the C string allocated by Go
+    return result;
 }

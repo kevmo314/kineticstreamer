@@ -211,6 +211,70 @@ class MainActivity : ComponentActivity() {
                             navigateBack = { navController.popBackStack("settings", false) }
                         )
                     }
+                    // Edit routes
+                    composable("settings/output/whip/edit/{index}") { backStackEntry ->
+                        val index = backStackEntry.arguments?.getString("index")?.toIntOrNull() ?: return@composable
+                        val configs = kotlinx.coroutines.runBlocking { settings.outputConfigurations.first() }
+                        if (index >= configs.size) return@composable
+                        val config = configs[index]
+                        // Parse whip://url?token=token format
+                        val rawUrl = config.url.removePrefix("whip://")
+                        val uri = android.net.Uri.parse(rawUrl)
+                        val token = uri.getQueryParameter("token") ?: ""
+                        val cleanUrl = uri.buildUpon().clearQuery().build().toString()
+
+                        AddWhipOutputScreen(
+                            onSave = { newConfig ->
+                                kotlinx.coroutines.runBlocking {
+                                    val currentConfigs = settings.outputConfigurations.first().toMutableList()
+                                    currentConfigs[index] = newConfig
+                                    settings.setOutputConfigurations(currentConfigs)
+                                }
+                            },
+                            onDelete = {
+                                kotlinx.coroutines.runBlocking {
+                                    val currentConfigs = settings.outputConfigurations.first().toMutableList()
+                                    currentConfigs.removeAt(index)
+                                    settings.setOutputConfigurations(currentConfigs)
+                                }
+                            },
+                            navigateBack = { navController.popBackStack("settings", false) },
+                            initialUrl = cleanUrl,
+                            initialToken = token
+                        )
+                    }
+                    composable("settings/output/srt/edit/{index}") { backStackEntry ->
+                        val index = backStackEntry.arguments?.getString("index")?.toIntOrNull() ?: return@composable
+                        val configs = kotlinx.coroutines.runBlocking { settings.outputConfigurations.first() }
+                        if (index >= configs.size) return@composable
+                        val config = configs[index]
+                        // Parse srt://host:port?streamid=id format
+                        val uri = android.net.Uri.parse(config.url)
+                        val host = uri.host ?: ""
+                        val port = uri.port.takeIf { it > 0 }?.toString() ?: "9000"
+                        val streamId = uri.getQueryParameter("streamid") ?: ""
+
+                        AddSrtOutputScreen(
+                            onSave = { newConfig ->
+                                kotlinx.coroutines.runBlocking {
+                                    val currentConfigs = settings.outputConfigurations.first().toMutableList()
+                                    currentConfigs[index] = newConfig
+                                    settings.setOutputConfigurations(currentConfigs)
+                                }
+                            },
+                            onDelete = {
+                                kotlinx.coroutines.runBlocking {
+                                    val currentConfigs = settings.outputConfigurations.first().toMutableList()
+                                    currentConfigs.removeAt(index)
+                                    settings.setOutputConfigurations(currentConfigs)
+                                }
+                            },
+                            navigateBack = { navController.popBackStack("settings", false) },
+                            initialHost = host,
+                            initialPort = port,
+                            initialStreamId = streamId
+                        )
+                    }
                 }
             }
         }

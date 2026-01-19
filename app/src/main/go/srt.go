@@ -11,12 +11,32 @@ package kinetic
 #cgo android,amd64 LDFLAGS: -L${SRCDIR}/../third_party/output/x86_64/lib -lsrt
 #cgo linux,amd64 CFLAGS: -I${SRCDIR}/../third_party/output/x86_64/include
 
+#include <stdint.h>
 #include <srt/srt.h>
+
+// Helper to get bandwidth from SRT stats
+static double srt_get_bandwidth_mbps(SRTSOCKET sock) {
+    SRT_TRACEBSTATS stats;
+    if (srt_bstats(sock, &stats, 0) == 0) {
+        return stats.mbpsBandwidth;
+    }
+    return 0.0;
+}
+
+// Helper to get send loss from SRT stats
+static int srt_get_snd_loss(SRTSOCKET sock) {
+    SRT_TRACEBSTATS stats;
+    if (srt_bstats(sock, &stats, 0) == 0) {
+        return stats.pktSndLoss;
+    }
+    return 0;
+}
 */
 import "C"
 import (
 	"bufio"
 	"fmt"
+	"log"
 	"net"
 	"net/url"
 	"strconv"
@@ -161,25 +181,44 @@ type SRTSocket struct {
 }
 
 func (s SRTSocket) Write(p []byte) (int, error) {
+	totalWritten := 0
 	for i := 0; i < len(p); i += s.payloadSize {
 		size := s.payloadSize
 		if i+size > len(p) {
 			size = len(p) - i
 		}
-		n, err := C.srt_send(s.fd, (*C.char)(unsafe.Pointer(&p[i])), C.int(size))
+		n := C.srt_send(s.fd, (*C.char)(unsafe.Pointer(&p[i])), C.int(size))
 		if n == -1 {
-			return 0, fmt.Errorf("failed to send payload: %w", err)
+			err := srtGetAndClearError()
+			log.Printf("SRT: srt_send failed: %v (wrote %d of %d bytes so far)", err, totalWritten, len(p))
+			return totalWritten, fmt.Errorf("srt_send failed: %w", err)
 		}
+		if int(n) != size {
+			log.Printf("SRT: srt_send partial write: wrote %d of %d bytes", n, size)
+			return totalWritten + int(n), fmt.Errorf("srt_send partial write: %d of %d", n, size)
+		}
+		totalWritten += int(n)
 	}
-	return len(p), nil
+	return totalWritten, nil
+}
+
+// PLICallback is called when a keyframe should be requested due to packet loss
+type SRTPLICallback interface {
+	OnPLI()
 }
 
 type SRTSink struct {
 	sync.Mutex
 
-	mpw    *mpegts.Writer
-	sck    SRTSocket
-	tracks []*mpegts.Track
+	mpw         *mpegts.Writer
+	bw          *bufio.Writer
+	sck         SRTSocket
+	tracks      []*mpegts.Track
+	pliCallback SRTPLICallback
+
+	// For tracking packet loss
+	lastPktSndLoss    int64
+	lastLossCheckTime time.Time
 }
 
 var sinkCount int
@@ -220,8 +259,11 @@ func sockAddrFromIp(ip net.IP, port uint16) (*C.struct_sockaddr, int, error) {
 }
 
 func NewSRTSink(s, encodedMediaFormatMimeTypes string) (*SRTSink, error) {
+	log.Printf("SRT: creating sink for %s with mimeTypes %s", s, encodedMediaFormatMimeTypes)
+
 	parsed, err := url.Parse(s)
 	if err != nil {
+		log.Printf("SRT: failed to parse URL: %v", err)
 		return nil, err
 	}
 
@@ -229,18 +271,22 @@ func NewSRTSink(s, encodedMediaFormatMimeTypes string) (*SRTSink, error) {
 	if ip == nil {
 		ips, err := net.LookupIP(parsed.Hostname())
 		if err != nil {
+			log.Printf("SRT: failed to resolve hostname %s: %v", parsed.Hostname(), err)
 			return nil, fmt.Errorf("failed to resolve hostname: %w", err)
 		}
 		ip = ips[0]
+		log.Printf("SRT: resolved %s to %s", parsed.Hostname(), ip)
 	}
 
 	iport, err := strconv.Atoi(parsed.Port())
 	if err != nil {
+		log.Printf("SRT: failed to parse port: %v", err)
 		return nil, err
 	}
 
 	sa, salen, err := sockAddrFromIp(ip, uint16(iport))
 	if err != nil {
+		log.Printf("SRT: failed to create sockaddr: %v", err)
 		return nil, err
 	}
 
@@ -251,20 +297,28 @@ func NewSRTSink(s, encodedMediaFormatMimeTypes string) (*SRTSink, error) {
 
 	if sinkCount == 0 {
 		C.srt_startup()
+		log.Printf("SRT: library initialized")
 	}
 	sinkCount++
 	fd := C.srt_create_socket()
+	log.Printf("SRT: created socket fd=%d", fd)
 
 	if err := setSocketOptions(fd, bindingPre, options); err != nil {
+		log.Printf("SRT: failed to set pre-bind options: %v", err)
 		return nil, err
 	}
 
+	log.Printf("SRT: connecting to %s:%d...", ip, iport)
 	if res := C.srt_connect(fd, sa, C.int(salen)); res == -1 {
+		err := srtGetAndClearError()
+		log.Printf("SRT: connect failed: %v", err)
 		C.srt_close(fd)
-		return nil, fmt.Errorf("srt_connect: %w", srtGetAndClearError())
+		return nil, fmt.Errorf("srt_connect: %w", err)
 	}
+	log.Printf("SRT: connected successfully")
 
 	if err := setSocketOptions(fd, bindingPost, options); err != nil {
+		log.Printf("SRT: failed to set post-bind options: %v", err)
 		return nil, err
 	}
 
@@ -272,39 +326,119 @@ func NewSRTSink(s, encodedMediaFormatMimeTypes string) (*SRTSink, error) {
 	if res, err := C.srt_getsockflag(fd, C.SRTO_PAYLOADSIZE, unsafe.Pointer(&payloadSize), (*C.int)(unsafe.Pointer(&payloadSize))); res == -1 {
 		return nil, fmt.Errorf("failed to get socket option: %w", err)
 	}
+	log.Printf("SRT: payload size = %d", payloadSize)
 
 	sck := SRTSocket{fd: fd, payloadSize: int(payloadSize)}
 
 	tracks := []*mpegts.Track{}
 	for _, v := range strings.Split(encodedMediaFormatMimeTypes, ";") {
+		codec := MediaFormatMimeType(v).MPEGTSCodec()
+		log.Printf("SRT: track %d: mimeType=%s codec=%T", len(tracks), v, codec)
 		tracks = append(tracks, &mpegts.Track{
-			Codec: MediaFormatMimeType(v).MPEGTSCodec(),
+			Codec: codec,
 		})
 	}
 
-	return &SRTSink{mpw: mpegts.NewWriter(bufio.NewWriterSize(sck, int(payloadSize)), tracks), sck: sck, tracks: tracks}, nil
+	bw := bufio.NewWriterSize(sck, int(payloadSize))
+	log.Printf("SRT: sink created with %d tracks", len(tracks))
+	return &SRTSink{mpw: mpegts.NewWriter(bw, tracks), bw: bw, sck: sck, tracks: tracks}, nil
 }
 
 
 
-func (s *SRTSink) WriteSample(i int, buf []byte, ptsMicroseconds int64, mediaCodecFlags int32) error {
-	t := s.tracks[i]
+// splitNALUs splits an Annex B byte stream into individual NAL units.
+// It handles both 3-byte (0x00 0x00 0x01) and 4-byte (0x00 0x00 0x00 0x01) start codes.
+func splitNALUs(buf []byte) [][]byte {
+	var nalus [][]byte
+	start := -1
 
-// 	isKeyframe := MediaCodecBufferFlag(mediaCodecFlags)&MediaCodecBufferFlagKeyFrame != 0
+	for i := 0; i < len(buf); i++ {
+		// Check for 4-byte start code
+		if i+3 < len(buf) && buf[i] == 0x00 && buf[i+1] == 0x00 && buf[i+2] == 0x00 && buf[i+3] == 0x01 {
+			if start >= 0 {
+				nalus = append(nalus, buf[start:i])
+			}
+			start = i + 4
+			i += 3
+			continue
+		}
+		// Check for 3-byte start code
+		if i+2 < len(buf) && buf[i] == 0x00 && buf[i+1] == 0x00 && buf[i+2] == 0x01 {
+			if start >= 0 {
+				nalus = append(nalus, buf[start:i])
+			}
+			start = i + 3
+			i += 2
+			continue
+		}
+	}
+
+	// Append the last NAL unit
+	if start >= 0 && start < len(buf) {
+		nalus = append(nalus, buf[start:])
+	}
+
+	return nalus
+}
+
+func (s *SRTSink) WriteSample(i int, buf []byte, ptsMicroseconds int64, mediaCodecFlags int32) error {
+	s.Lock()
+	defer s.Unlock()
+
+	if i >= len(s.tracks) {
+		log.Printf("SRT: invalid track index %d (have %d tracks)", i, len(s.tracks))
+		return fmt.Errorf("invalid track index %d", i)
+	}
+
+	t := s.tracks[i]
+	if t.Codec == nil {
+		log.Printf("SRT: track %d has nil codec", i)
+		return fmt.Errorf("track %d has nil codec", i)
+	}
+
+	isKeyframe := MediaCodecBufferFlag(mediaCodecFlags)&MediaCodecBufferFlagKeyFrame != 0
 
 	pts := int64((time.Duration(ptsMicroseconds) * time.Microsecond).Seconds() * 90000)
 
+	var err error
 	switch t.Codec.(type) {
 	case *mpegts.CodecH264, *mpegts.CodecH265:
-// 		return s.mpw.WriteVideo(t, pts, pts, isKeyframe, buf)
-        return nil
+		nalus := splitNALUs(buf)
+		if len(nalus) == 0 {
+			log.Printf("SRT: no NALUs found in %d byte buffer", len(buf))
+			return nil
+		}
+		err = s.mpw.WriteH26x(t, pts, pts, isKeyframe, nalus)
+		if err != nil {
+			log.Printf("SRT: WriteH26x error: %v", err)
+		}
 	case *mpegts.CodecOpus:
-		return s.mpw.WriteOpus(t, pts, [][]byte{buf})
+		err = s.mpw.WriteOpus(t, pts, [][]byte{buf})
+		if err != nil {
+			log.Printf("SRT: WriteOpus error: %v", err)
+		}
 	case *mpegts.CodecMPEG4Audio:
-		return s.mpw.WriteMPEG4Audio(t, pts, [][]byte{buf})
+		err = s.mpw.WriteMPEG4Audio(t, pts, [][]byte{buf})
+		if err != nil {
+			log.Printf("SRT: WriteMPEG4Audio error: %v", err)
+		}
 	default:
+		log.Printf("SRT: unknown codec type for track %d: %T", i, t.Codec)
 		return nil
 	}
+
+	if err != nil {
+		return err
+	}
+
+	// Flush the buffer to ensure data is sent over the network
+	buffered := s.bw.Buffered()
+	if err := s.bw.Flush(); err != nil {
+		log.Printf("SRT: flush error: %v (had %d bytes buffered)", err, buffered)
+		return err
+	}
+
+	return nil
 }
 
 func (s *SRTSink) Close() error {
@@ -314,4 +448,43 @@ func (s *SRTSink) Close() error {
 		C.srt_cleanup()
 	}
 	return nil
+}
+
+func (s *SRTSink) SetPLICallback(callback SRTPLICallback) {
+	s.Lock()
+	defer s.Unlock()
+	s.pliCallback = callback
+}
+
+// GetStatsAndBandwidth returns the estimated bandwidth in bits per second
+// and triggers a PLI callback if packet loss is detected
+func (s *SRTSink) GetStatsAndBandwidth() int64 {
+	s.Lock()
+	defer s.Unlock()
+
+	// Get bandwidth from SRT stats (in Mb/s)
+	bandwidthMbps := float64(C.srt_get_bandwidth_mbps(s.sck.fd))
+
+	// Convert Mb/s to bits/sec, cap at 7.5 Mbps max
+	bandwidthBps := int64(bandwidthMbps * 1000000)
+	const maxBandwidthBps = 7500000 // 7.5 Mbps cap
+	if bandwidthBps > maxBandwidthBps {
+		bandwidthBps = maxBandwidthBps
+	}
+
+	// Check for packet loss and trigger PLI if needed
+	currentLoss := int64(C.srt_get_snd_loss(s.sck.fd))
+	now := time.Now()
+
+	// Trigger PLI if we see new packet loss (check at most once per second)
+	if currentLoss > s.lastPktSndLoss && now.Sub(s.lastLossCheckTime) > time.Second {
+		if s.pliCallback != nil {
+			log.Printf("SRT: packet loss detected (%d -> %d), requesting keyframe", s.lastPktSndLoss, currentLoss)
+			go s.pliCallback.OnPLI() // Call asynchronously to avoid deadlock
+		}
+		s.lastPktSndLoss = currentLoss
+		s.lastLossCheckTime = now
+	}
+
+	return bandwidthBps
 }

@@ -99,6 +99,8 @@ fun MainScreen(
                 val currentBitrate = remember { mutableIntStateOf(0) }
                 val currentFps = remember { mutableStateOf(0f) }
                 val audioLevels = remember { mutableStateOf(emptyList<Float>()) }
+                val iceConnectionState = remember { mutableStateOf("") }
+                val peerConnectionState = remember { mutableStateOf("") }
                 
                 // Set up audio level callback
                 LaunchedEffect(stub) {
@@ -111,17 +113,21 @@ fun MainScreen(
                     })
                 }
                 
-                // Periodically update bitrate and FPS when streaming
+                // Periodically update bitrate, FPS, and connection states when streaming
                 LaunchedEffect(isStreaming.value) {
                     if (isStreaming.value) {
                         while (isStreaming.value) {
                             currentBitrate.intValue = stub.currentBitrate
                             currentFps.value = stub.currentFps
+                            iceConnectionState.value = stub.whipIceConnectionState ?: ""
+                            peerConnectionState.value = stub.whipPeerConnectionState ?: ""
                             delay(250) // Update 4 times per second
                         }
                     } else {
                         currentBitrate.intValue = 0
                         currentFps.value = 0f
+                        iceConnectionState.value = ""
+                        peerConnectionState.value = ""
                     }
                 }
 
@@ -195,6 +201,33 @@ fun MainScreen(
                                     text = "%.1f fps".format(currentFps.value),
                                     color = Color.White,
                                     fontSize = 16.sp,
+                                    fontWeight = FontWeight.Normal
+                                )
+                            }
+                            // Show WHIP connection states
+                            if (iceConnectionState.value.isNotEmpty() && iceConnectionState.value != "none") {
+                                Text(
+                                    text = "ICE: ${iceConnectionState.value}",
+                                    color = when (iceConnectionState.value) {
+                                        "connected" -> Color.Green
+                                        "checking", "new" -> Color.Yellow
+                                        "disconnected", "failed", "closed" -> Color.Red
+                                        else -> Color.Gray
+                                    },
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Normal
+                                )
+                            }
+                            if (peerConnectionState.value.isNotEmpty() && peerConnectionState.value != "none") {
+                                Text(
+                                    text = "Peer: ${peerConnectionState.value}",
+                                    color = when (peerConnectionState.value) {
+                                        "connected" -> Color.Green
+                                        "connecting", "new" -> Color.Yellow
+                                        "disconnected", "failed", "closed" -> Color.Red
+                                        else -> Color.Gray
+                                    },
+                                    fontSize = 14.sp,
                                     fontWeight = FontWeight.Normal
                                 )
                             }

@@ -94,10 +94,13 @@ fun SettingsScreen(
 
             for ((index, outputConfiguration) in outputConfigurations.value.withIndex()) {
                 Surface(onClick = {
-                    runBlocking {
-                        val updatedConfigurations = outputConfigurations.value.toMutableList()
-                        updatedConfigurations[index] = outputConfiguration.copy(enabled = !outputConfiguration.enabled)
-                        settings.setOutputConfigurations(updatedConfigurations)
+                    // Navigate to edit screen based on protocol
+                    when {
+                        outputConfiguration.url.startsWith("whip://") -> navigateTo("settings/output/whip/edit/$index")
+                        outputConfiguration.url.startsWith("srt://") -> navigateTo("settings/output/srt/edit/$index")
+                        outputConfiguration.url.startsWith("rtmp://") -> navigateTo("settings/output/rtmp/edit/$index")
+                        outputConfiguration.url.startsWith("rtsp://") -> navigateTo("settings/output/rtsp/edit/$index")
+                        outputConfiguration.url.startsWith("file://") -> navigateTo("settings/output/disk/edit/$index")
                     }
                 }) {
                     Row(

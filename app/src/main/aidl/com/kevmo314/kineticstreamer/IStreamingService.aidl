@@ -16,7 +16,7 @@ interface IStreamingService {
     boolean isStreaming();
     
     int getCurrentBitrate();
-    
+
     float getCurrentFps();
     
     void setAudioLevelCallback(in IAudioLevelCallback callback);
@@ -27,4 +27,9 @@ interface IStreamingService {
     void updateWebViewOverlay(in String url, int x, int y, int width, int height);
     
     void removeWebViewOverlay();
+
+    // WHIP connection state methods
+    String getWhipIceConnectionState();
+
+    String getWhipPeerConnectionState();
 }

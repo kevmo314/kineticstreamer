@@ -32,6 +32,7 @@ import android.view.Surface
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import com.kevmo314.kineticstreamer.kinetic.WHIPSink
+import com.kevmo314.kineticstreamer.kinetic.SRTSink
 import com.kevmo314.kineticstreamer.kinetic.PLICallback
 import android.os.Bundle
 import kotlinx.coroutines.CoroutineScope
@@ -132,8 +133,11 @@ class StreamingService : Service() {
     private var renderer: SurfaceTextureRenderer? = null
     private var webViewOverlay: WebViewOverlay? = null
     private var whipSink: WHIPSink? = null
+    private var srtSink: SRTSink? = null
     private var queue: ExecutorService? = null
     private var lastBitrate: Int = 0 // Track last bitrate to avoid frequent updates
+    private var videoFrameCount: Long = 0 // Counter for debug logging
+    private var useOpusAudio: Boolean = true // Track audio codec: true=Opus (WHIP), false=AAC (SRT)
     private var audioFlowJob: Job? = null
     private var audioLevelCallback: IAudioLevelCallback? = null
     
@@ -153,6 +157,7 @@ class StreamingService : Service() {
     // Timestamp synchronization
     private var streamStartTimeNanos: Long = 0
     private var audioSampleCount: Long = 0
+    private var audioEncoderSampleCount: Long = 0 // Samples actually sent to encoder
     private var lastVideoTimestampNanos: Long = 0
 
     private val binder = object : IStreamingService.Stub() {
@@ -189,7 +194,12 @@ class StreamingService : Service() {
             // Initialize timestamp synchronization FIRST
             streamStartTimeNanos = System.nanoTime()
             audioSampleCount = 0
+            audioEncoderSampleCount = 0
+            audioBufferQueue.clear()
+            audioBufferRemainder = ByteArray(0)
             lastVideoTimestampNanos = 0
+            videoFrameCount = 0
+            lastBitrate = 0
             Log.i("StreamingService", "Stream started at nanos: $streamStartTimeNanos")
             
             // Setup and start encoders (they'll use the initialized timestamps)
@@ -234,10 +244,12 @@ class StreamingService : Service() {
             audioEncoder?.release() 
             audioEncoder = null
             
-            // Clean up WHIP sink
+            // Clean up sinks
             whipSink?.close()
             whipSink = null
-            
+            srtSink?.close()
+            srtSink = null
+
             // Clean up queue
             queue?.shutdown()
             queue = null
@@ -307,12 +319,31 @@ class StreamingService : Service() {
             webViewOverlay?.release()
             webViewOverlay = null
             renderer?.removeOverlay()
-            
+
             Log.i("StreamingService", "WebView overlay removed")
+        }
+
+        override fun getWhipIceConnectionState(): String {
+            return whipSink?.getICEConnectionState() ?: "none"
+        }
+
+        override fun getWhipPeerConnectionState(): String {
+            return whipSink?.getPeerConnectionState() ?: "none"
         }
     }
     
     private fun setupEncoders() {
+        // Read output configurations FIRST to determine audio codec
+        val outputConfigs = runBlocking { settings?.outputConfigurations?.first() } ?: emptyList()
+        Log.i("StreamingService", "Output configurations: $outputConfigs")
+
+        // Determine audio codec based on enabled sinks
+        // WHIP (WebRTC) requires Opus, SRT prefers AAC for MPEG-TS compatibility
+        val whipEnabled = outputConfigs.any { it.enabled && (it.url.startsWith("whip://") || it.url.startsWith("https://") || it.url.startsWith("http://")) }
+        val srtEnabled = outputConfigs.any { it.enabled && it.url.startsWith("srt://") }
+        useOpusAudio = whipEnabled || !srtEnabled  // Opus if WHIP enabled or no sinks configured
+        Log.i("StreamingService", "Audio codec: ${if (useOpusAudio) "Opus" else "AAC"} (WHIP=$whipEnabled, SRT=$srtEnabled)")
+
         // Hardcode H.264 video format optimized for ultra-low latency
         val videoMediaFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, 1920, 1080).apply {
             val initialBitrate = 2000000  // 2 Mbps initial, adjusted dynamically by GCC
@@ -323,7 +354,12 @@ class StreamingService : Service() {
             // Ultra-low latency settings
             setInteger(MediaFormat.KEY_CAPTURE_RATE, 30)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 5)
-//            setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR) // CBR not supported by all HW encoders
+
+            // CBR with frame drop for strict constant bitrate
+            setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR_FD)
+
+            // Set max bitrate to prevent spikes (same as target for strict CBR)
+            setInteger("max-bitrate", initialBitrate)
 
             // Disable B-frames for lower latency (P-frames only)
 //            setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
@@ -343,40 +379,98 @@ class StreamingService : Service() {
             setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel4)
         }
 
-        // Hardcode Opus audio format optimized for low latency
-        val audioMediaFormat = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, 48000, 1).apply {
-            setInteger(MediaFormat.KEY_BIT_RATE, 64000)
-            
-            // Low-latency Opus settings
-            try {
-                setInteger(MediaFormat.KEY_PRIORITY, 0) // Real-time priority
-                setInteger(MediaFormat.KEY_LATENCY, 0) // Ultra-low latency mode
-                setInteger("opus-use-inband-fec", 0) // Disable FEC for lower latency
-                setInteger("opus-packet-loss-perc", 0) // Assume no packet loss for lower latency
-                setString("opus-application", "voip") // VoIP mode for lowest latency
-            } catch (e: Exception) {
-                Log.w("StreamingService", "Opus latency optimizations not supported: ${e.message}")
+        // Create audio format based on selected codec
+        val audioMediaFormat = if (useOpusAudio) {
+            // Opus for WHIP/WebRTC - mono, 48kHz
+            MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, 48000, 1).apply {
+                setInteger(MediaFormat.KEY_BIT_RATE, 64000)
+
+                // Low-latency Opus settings
+                try {
+                    setInteger(MediaFormat.KEY_PRIORITY, 0) // Real-time priority
+                    setInteger(MediaFormat.KEY_LATENCY, 0) // Ultra-low latency mode
+                    setInteger("opus-use-inband-fec", 0) // Disable FEC for lower latency
+                    setInteger("opus-packet-loss-perc", 0) // Assume no packet loss for lower latency
+                    setString("opus-application", "voip") // VoIP mode for lowest latency
+                } catch (e: Exception) {
+                    Log.w("StreamingService", "Opus latency optimizations not supported: ${e.message}")
+                }
+
+                Log.i("StreamingService", "Opus encoder configured for ultra-low latency: VoIP mode, no FEC")
             }
-            
-            Log.i("StreamingService", "Opus encoder configured for ultra-low latency: VoIP mode, no FEC")
+        } else {
+            // AAC for SRT/MPEG-TS - mono, 48kHz, AAC-LC profile (mono to match audio source)
+            MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, 48000, 1).apply {
+                setInteger(MediaFormat.KEY_BIT_RATE, 128000)
+                setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+
+                try {
+                    setInteger(MediaFormat.KEY_PRIORITY, 0) // Real-time priority
+                } catch (e: Exception) {
+                    Log.w("StreamingService", "AAC priority setting not supported: ${e.message}")
+                }
+
+                Log.i("StreamingService", "AAC encoder configured: 128kbps, AAC-LC, mono")
+            }
         }
 
-        // Create WHIP sink with hardcoded URL and token
-        whipSink = WHIPSink("https://b.siobud.com/api/whip", "mugit",
-            listOf(videoMediaFormat.getString(MediaFormat.KEY_MIME), audioMediaFormat.getString(MediaFormat.KEY_MIME))
-                .joinToString(";"))
-        
-        // Set up PLI callback to request keyframes
-        whipSink?.setPLICallback(object : PLICallback {
-            override fun onPLI() {
-                Log.d("StreamingService", "PLI received, requesting keyframe")
-                videoEncoder?.let { encoder ->
-                    val params = Bundle()
-                    params.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
-                    encoder.setParameters(params)
+        // Create sinks based on configured outputs
+        val mimeTypes = listOf(
+            videoMediaFormat.getString(MediaFormat.KEY_MIME),
+            audioMediaFormat.getString(MediaFormat.KEY_MIME)
+        ).joinToString(";")
+
+        for (config in outputConfigs) {
+            if (!config.enabled) continue
+
+            when {
+                config.url.startsWith("srt://") -> {
+                    Log.i("StreamingService", "Creating SRT sink for ${config.url}")
+                    srtSink = SRTSink(config.url, mimeTypes)
+
+                    // Set up PLI callback to request keyframes on packet loss
+                    srtSink?.setPLICallback(object : PLICallback {
+                        override fun onPLI() {
+                            Log.d("StreamingService", "SRT PLI received, requesting keyframe")
+                            videoEncoder?.let { encoder ->
+                                val params = Bundle()
+                                params.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+                                encoder.setParameters(params)
+                            }
+                        }
+                    })
+                }
+                config.url.startsWith("whip://") || config.url.startsWith("https://") || config.url.startsWith("http://") -> {
+                    // WHIP sink - strip whip:// prefix and extract token from query params
+                    val rawUrl = if (config.url.startsWith("whip://")) config.url.removePrefix("whip://") else config.url
+                    val uri = android.net.Uri.parse(rawUrl)
+                    val token = uri.getQueryParameter("token") ?: ""
+                    // Remove token from URL to get clean endpoint
+                    val cleanUrl = uri.buildUpon().clearQuery().apply {
+                        uri.queryParameterNames.filter { it != "token" }.forEach {
+                            appendQueryParameter(it, uri.getQueryParameter(it))
+                        }
+                    }.build().toString()
+                    Log.i("StreamingService", "Creating WHIP sink for $cleanUrl with token=${token.take(4)}...")
+                    whipSink = WHIPSink(cleanUrl, token, mimeTypes)
+
+                    // Set up PLI callback to request keyframes
+                    whipSink?.setPLICallback(object : PLICallback {
+                        override fun onPLI() {
+                            Log.d("StreamingService", "PLI received, requesting keyframe")
+                            videoEncoder?.let { encoder ->
+                                val params = Bundle()
+                                params.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+                                encoder.setParameters(params)
+                            }
+                        }
+                    })
+                }
+                else -> {
+                    Log.w("StreamingService", "Unknown output protocol: ${config.url}")
                 }
             }
-        })
+        }
 
         queue = Executors.newSingleThreadExecutor()
 
@@ -410,7 +504,14 @@ class StreamingService : Service() {
 
                     // Process immediately for ultra-low latency (no queuing)
                     try {
+                        // Write to WHIP sink if configured
                         val gccTargetBitrate = whipSink?.writeH264(array, ts) ?: 0
+
+                        // Write to SRT sink if configured
+                        srtSink?.writeSample(0, array, ts, info.flags)
+
+                        // Get SRT bandwidth estimate (in bps)
+                        val srtBandwidth = srtSink?.getEstimatedBandwidth() ?: 0L
 
                         frameCount++
                         val now = System.nanoTime()
@@ -420,20 +521,34 @@ class StreamingService : Service() {
                         // Log timing every 90 frames (~3 sec at 30fps)
                         if (frameCount % 90 == 0) {
                             val effectiveFps = if (interFrameMs > 0) 1000.0 / interFrameMs else 0.0
-                            Log.i("StreamingService", "Encoder: frame=$frameCount, ${String.format("%.1f", effectiveFps)}fps, ${array.size/1024}KB")
+                            Log.i("StreamingService", "Encoder: frame=$frameCount, ${String.format("%.1f", effectiveFps)}fps, ${array.size/1024}KB" +
+                                if (srtBandwidth > 0) ", SRT BW=${srtBandwidth/1000}Kbps" else "")
                         }
 
-                        // Update encoder bitrate if changed significantly (>5% difference)
-                        // Leave 25% headroom for FEC overhead (per RFC 8854 recommendations)
-                        if (gccTargetBitrate > 0) {
-                            val encoderBitrate = (gccTargetBitrate * 0.75).toInt()
+                        // Update encoder bitrate based on bandwidth estimation
+                        // Use WHIP GCC if available, otherwise use SRT bandwidth
+                        val targetBitrate = when {
+                            gccTargetBitrate > 0 -> gccTargetBitrate
+                            srtBandwidth > 0 -> srtBandwidth.toInt()
+                            else -> 0
+                        }
+
+                        // Subtract fixed audio bitrate (64 Kbps Opus) from GCC total estimate
+                        val audioBitrate = 64000
+                        val encoderBitrate = maxOf(targetBitrate - audioBitrate, 100000) // Min 100 Kbps video
+                        if (encoderBitrate > 0) {
                             val diff = kotlin.math.abs(encoderBitrate - lastBitrate)
+                            // Debug: log every 100 frames
+                            videoFrameCount++
+                            if (videoFrameCount % 100 == 0L) {
+                                Log.d("StreamingService", "Bitrate check: gcc=$gccTargetBitrate encoder=$encoderBitrate last=$lastBitrate")
+                            }
                             if (diff > lastBitrate * 0.05) {
                                 videoEncoder?.let { encoder ->
                                     val params = Bundle()
                                     params.putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, encoderBitrate)
                                     encoder.setParameters(params)
-                                    Log.i("StreamingService", "Bitrate: GCC=${gccTargetBitrate/1000}Kbps -> Encoder=${encoderBitrate/1000}Kbps (75% for FEC headroom)")
+                                    Log.i("StreamingService", "Bitrate: GCC=${targetBitrate/1000}Kbps - Audio=${audioBitrate/1000}Kbps -> Video=${encoderBitrate/1000}Kbps")
                                     lastBitrate = encoderBitrate
                                 }
                             }
@@ -482,31 +597,57 @@ class StreamingService : Service() {
             configure(audioMediaFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
 
             setCallback(object : MediaCodec.Callback() {
+                var audioInputCount = 0L
+                var audioOutputCount = 0L
+
                 override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {
                     try {
-                        // Get latest audio data (non-blocking)
-                        val audioData = latestAudioData.getAndSet(null)
-                        if (audioData == null) {
+                        val buffer = codec.getInputBuffer(index) ?: return
+                        buffer.clear()
+                        val bufferCapacity = buffer.capacity()
+
+                        // Build up data to fill the encoder buffer
+                        var accumulated = audioBufferRemainder
+
+                        // Pull from queue until we have enough data
+                        while (accumulated.size < bufferCapacity) {
+                            val chunk = audioBufferQueue.poll() ?: break
+                            accumulated = accumulated + chunk
+                        }
+
+                        if (accumulated.isEmpty()) {
                             // No data available, queue empty buffer
                             codec.queueInputBuffer(index, 0, 0, 0, 0)
                             return
                         }
 
-                        val buffer = codec.getInputBuffer(index) ?: return
-                        buffer.clear()
+                        // Take what we need, save the rest
+                        val dataSize = minOf(accumulated.size, bufferCapacity)
+                        buffer.put(accumulated, 0, dataSize)
 
-                        val dataSize = minOf(audioData.size, buffer.capacity())
-                        buffer.put(audioData, 0, dataSize)
+                        // Save remainder for next call
+                        audioBufferRemainder = if (accumulated.size > dataSize) {
+                            accumulated.copyOfRange(dataSize, accumulated.size)
+                        } else {
+                            ByteArray(0)
+                        }
+
+                        // Debug: log input PCM size periodically
+                        audioInputCount++
+                        if (audioInputCount % 100 == 0L) {
+                            Log.i("StreamingService", "Audio INPUT: frame=$audioInputCount, accumulated=${accumulated.size}, sent=$dataSize, remainder=${audioBufferRemainder.size}, queueSize=${audioBufferQueue.size}")
+                        }
 
                         // Calculate timestamp for this audio buffer
                         val sampleRate = 48000
                         val samplesInBuffer = dataSize / 2 // 16-bit PCM
                         val timestampUs = if (streamStartTimeNanos > 0) {
-                            val elapsedNanos = ((audioSampleCount - samplesInBuffer) * 1_000_000_000L) / sampleRate
+                            val elapsedNanos = (audioEncoderSampleCount * 1_000_000_000L) / sampleRate
                             elapsedNanos / 1000 // Relative time from start
                         } else {
-                            0L // Start from 0
+                            0L
                         }
+                        audioEncoderSampleCount += samplesInBuffer
 
                         codec.queueInputBuffer(index, 0, dataSize, timestampUs, 0)
                     } catch (e: IllegalStateException) {
@@ -524,11 +665,25 @@ class StreamingService : Service() {
                         val array = ByteArray(info.size)
                         buffer.get(array, info.offset, info.size)
 
+                        // Debug: log output AAC size periodically
+                        audioOutputCount++
+                        if (audioOutputCount % 100 == 0L) {
+                            Log.i("StreamingService", "Audio OUTPUT: frame=$audioOutputCount, aacSize=${array.size}, pts=${info.presentationTimeUs}")
+                        }
+
                         // Process immediately for ultra-low latency (no queuing)
+                        // Route audio to appropriate sinks based on codec
                         try {
-                            whipSink?.writeOpus(array, info.presentationTimeUs)
+                            if (useOpusAudio) {
+                                // Opus mode - write to WHIP (WebRTC) and SRT (if configured)
+                                whipSink?.writeOpus(array, info.presentationTimeUs)
+                                srtSink?.writeSample(1, array, info.presentationTimeUs, info.flags)
+                            } else {
+                                // AAC mode - only SRT supports AAC in MPEG-TS
+                                srtSink?.writeSample(1, array, info.presentationTimeUs, info.flags)
+                            }
                         } catch (e: Exception) {
-                            Log.e("StreamingService", "Error writing Opus data: ${e.message}", e)
+                            Log.e("StreamingService", "Error writing audio data: ${e.message}", e)
                         }
 
                         codec.releaseOutputBuffer(index, false)
@@ -607,42 +762,20 @@ class StreamingService : Service() {
     }
     
     
-    // Holds latest audio data for the encoder callback (replaces previous value to avoid backup)
-    private val latestAudioData = AtomicReference<ByteArray?>(null)
+    // Audio buffer queue to properly handle size mismatches between AudioSource and encoder
+    private val audioBufferQueue = java.util.concurrent.LinkedBlockingQueue<ByteArray>(100)
+    private var audioBufferRemainder = ByteArray(0) // Leftover bytes from previous chunk
 
     private fun feedAudioDataToEncoder(audioData: ByteArray) {
-        // Calculate timestamp based on sample count
-        val sampleRate = 48000 // Must match AudioSource sample rate
-        val samplesInBuffer = audioData.size / 2 // 16-bit PCM = 2 bytes per sample
-        
-        // Calculate precise timestamp relative to stream start
-        val timestampUs = if (streamStartTimeNanos > 0) {
-            val elapsedNanos = (audioSampleCount * 1_000_000_000L) / sampleRate
-            elapsedNanos / 1000 // Convert to microseconds (relative time from start)
-        } else {
-            0L // Start from 0 if stream not yet started
-        }
-        
         // Update sample count for next frame
+        val samplesInBuffer = audioData.size / 2 // 16-bit PCM = 2 bytes per sample
         audioSampleCount += samplesInBuffer
 
-        // Play audio for debugging
-//        val bytesWritten = debugAudioTrack?.write(audioData, 0, audioData.size) ?: 0
-//        if (bytesWritten < audioData.size) {
-//            Log.w("StreamingService", "AudioTrack only wrote $bytesWritten of ${audioData.size} bytes")
-//        } else if (bytesWritten > 0) {
-//            // Log successful write periodically for debugging
-//            if (System.currentTimeMillis() % 1000 < 50) { // Log roughly once per second
-//                val maxValue = audioData.maxOfOrNull { abs(it.toInt()) } ?: 0
-//                Log.d("StreamingService", "AudioTrack wrote $bytesWritten bytes, playState: ${debugAudioTrack?.playState}, max amplitude: $maxValue, has sound: $hasSound")
-//            }
-//        }
-        
         // Calculate audio levels for visualizer
         calculateAndSendAudioLevels(audioData)
-        
-        // Store latest audio data for the encoder callback (overwrites previous)
-        latestAudioData.set(audioData)
+
+        // Add to queue for encoder (non-blocking, drop if queue is full)
+        audioBufferQueue.offer(audioData)
     }
 
     private fun calculateAndSendAudioLevels(audioData: ByteArray) {
@@ -971,7 +1104,9 @@ class StreamingService : Service() {
         
         whipSink?.close()
         whipSink = null
-        
+        srtSink?.close()
+        srtSink = null
+
         queue?.shutdown()
         queue = null
         

@@ -3,6 +3,7 @@ package kinetic
 import (
 	"fmt"
 
+	"github.com/bluenviron/mediacommon/pkg/codecs/mpeg4audio"
 	"github.com/bluenviron/mediacommon/pkg/formats/mpegts"
 	"github.com/pion/webrtc/v4"
 )
@@ -19,7 +20,7 @@ const (
 	MediaFormatMimeTypeVideoAV1  MediaFormatMimeType = "video/av01"
 	MediaFormatMimeTypeVideoH264 MediaFormatMimeType = "video/avc"
 	MediaFormatMimeTypeVideoH265 MediaFormatMimeType = "video/hevc"
-	MediaFormatMimeTypeAudioAAC  MediaFormatMimeType = "audio/aac"
+	MediaFormatMimeTypeAudioAAC  MediaFormatMimeType = "audio/mp4a-latm"
 	MediaFormatMimeTypeAudioOpus MediaFormatMimeType = "audio/opus"
 )
 
@@ -51,7 +52,15 @@ func (t MediaFormatMimeType) MPEGTSCodec() mpegts.Codec {
 	case MediaFormatMimeTypeVideoH265:
 		return &mpegts.CodecH265{}
 	case MediaFormatMimeTypeAudioAAC:
-		return &mpegts.CodecMPEG4Audio{}
+		// AAC-LC at 48kHz - using stereo config as Android AAC encoder may output stereo
+		// even when configured for mono input
+		return &mpegts.CodecMPEG4Audio{
+			Config: mpeg4audio.Config{
+				Type:         mpeg4audio.ObjectTypeAACLC,
+				SampleRate:   48000,
+				ChannelCount: 2,
+			},
+		}
 	case MediaFormatMimeTypeAudioOpus:
 		return &mpegts.CodecOpus{}
 	default:

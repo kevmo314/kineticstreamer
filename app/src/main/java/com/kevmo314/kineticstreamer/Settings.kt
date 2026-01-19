@@ -11,6 +11,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlin.math.ln
 import kotlin.math.pow
@@ -114,7 +115,7 @@ class Settings(private val dataStore: DataStore<Preferences>) {
         dataStore.edit { it[_recordingMaxCapacityBytes] = maxCapacityBytes }
     }
     
-    val selectedVideoDevice = dataStore.data.map { it[_selectedVideoDevice] }
+    val selectedVideoDevice = dataStore.data.map { it[_selectedVideoDevice] }.distinctUntilChanged()
     
     suspend fun setSelectedVideoDevice(device: VideoSourceDevice?) {
         dataStore.edit { 
@@ -126,7 +127,7 @@ class Settings(private val dataStore: DataStore<Preferences>) {
         }
     }
 
-    val selectedAudioDevice = dataStore.data.map { it[_selectedAudioDevice] }
+    val selectedAudioDevice = dataStore.data.map { it[_selectedAudioDevice] }.distinctUntilChanged()
 
     suspend fun setSelectedAudioDevice(deviceId: Int?) {
         dataStore.edit {

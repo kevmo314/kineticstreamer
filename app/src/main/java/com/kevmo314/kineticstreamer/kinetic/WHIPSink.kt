@@ -77,6 +77,22 @@ class WHIPSink(url: String, token: String, mimeTypes: String) : Closeable {
     }
 
     private external fun close(handle: Long)
+    private external fun getICEConnectionState(handle: Long): String
+    private external fun getPeerConnectionState(handle: Long): String
+
+    /**
+     * Get the current ICE connection state
+     */
+    fun getICEConnectionState(): String {
+        return if (nativeHandle != 0L) getICEConnectionState(nativeHandle) else "unknown"
+    }
+
+    /**
+     * Get the current peer connection state
+     */
+    fun getPeerConnectionState(): String {
+        return if (nativeHandle != 0L) getPeerConnectionState(nativeHandle) else "unknown"
+    }
 
     protected fun finalize() {
         close()

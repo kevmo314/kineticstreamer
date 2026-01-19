@@ -59,7 +59,7 @@ android {
 
     defaultConfig {
         applicationId = "com.kevmo314.kineticstreamer"
-        minSdk = 29
+        minSdk = 31
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"

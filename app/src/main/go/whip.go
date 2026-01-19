@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +37,8 @@ type WHIPSink struct {
 	mimeTypes       string
 	connectionState webrtc.ICEConnectionState
 	reconnecting    bool
+	resourceURL     string // WHIP resource URL for DELETE on close
+	closed          bool   // Set to true when intentionally closed
 }
 
 type whipTrack struct {
@@ -91,20 +94,25 @@ func NewWHIPSink(url, bearerToken, encodedMediaFormatMimeTypes string) (*WHIPSin
 
 // connect establishes a new WebRTC connection
 func (s *WHIPSink) connect() error {
+	log.Printf("WHIP connect: starting with mimeTypes=%s", s.mimeTypes)
 	mediaFormatMimeTypes := strings.Split(s.mimeTypes, ";")
 	tracks := make([]*whipTrack, len(mediaFormatMimeTypes))
 
+	log.Printf("WHIP connect: getting network interfaces")
 	ifs, err := androidnet.Interfaces()
 	if err != nil {
+		log.Printf("WHIP connect: failed to get interfaces: %v", err)
 		return err
 	}
 
-	log.Printf("Interfaces: %v", ifs)
+	log.Printf("WHIP connect: interfaces: %v", ifs)
 
 	net, err := androidnet.NewNet()
 	if err != nil {
+		log.Printf("WHIP connect: failed to create net: %v", err)
 		return err
 	}
+	log.Printf("WHIP connect: net created")
 
 	settingEngine := webrtc.SettingEngine{}
 
@@ -142,9 +150,13 @@ func (s *WHIPSink) connect() error {
 	i.Add(responderFactory)
 
 	// Create congestion controller with Google Congestion Control
-	// Initial bitrate: 1 Mbps
+	// Initial bitrate: 1 Mbps, Min: 150 Kbps, Max: 7.5 Mbps
 	congestionController, err := cc.NewInterceptor(func() (cc.BandwidthEstimator, error) {
-		return gcc.NewSendSideBWE(gcc.SendSideBWEInitialBitrate(1_000_000))
+		return gcc.NewSendSideBWE(
+			gcc.SendSideBWEInitialBitrate(1_000_000),
+			gcc.SendSideBWEMinBitrate(150_000),
+			gcc.SendSideBWEMaxBitrate(7_500_000),
+		)
 	})
 	if err != nil {
 		return err
@@ -184,13 +196,16 @@ func (s *WHIPSink) connect() error {
 	s.pc = peerConnection
 
 	for i, mediaFormatMimeType := range mediaFormatMimeTypes {
+		pionMimeType := MediaFormatMimeType(mediaFormatMimeType).PionMimeType()
+		log.Printf("WHIP connect: track %d: input=%s pion=%s", i, mediaFormatMimeType, pionMimeType)
 		codecCap := webrtc.RTPCodecCapability{
-			MimeType: MediaFormatMimeType(mediaFormatMimeType).PionMimeType(),
+			MimeType: pionMimeType,
 		}
 
 		// Create TrackLocalStaticRTP for direct RTP packet control
 		track, err := webrtc.NewTrackLocalStaticRTP(codecCap, uuid.NewString(), uuid.NewString())
 		if err != nil {
+			log.Printf("WHIP connect: failed to create track %d: %v", i, err)
 			return err
 		}
 
@@ -281,6 +296,7 @@ func (s *WHIPSink) connect() error {
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		log.Printf("WHIP: HTTP request failed: %v", err)
 		return err
 	}
 	defer resp.Body.Close()
@@ -288,11 +304,36 @@ func (s *WHIPSink) connect() error {
 	if err != nil {
 		return err
 	}
+	// Check for HTTP errors
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Printf("WHIP: server returned HTTP %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("WHIP server returned HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Store the resource URL from Location header for DELETE on close
+	if location := resp.Header.Get("Location"); location != "" {
+		// Handle relative URLs properly using net/url
+		baseURL, err := url.Parse(s.url)
+		if err == nil {
+			locationURL, err := url.Parse(location)
+			if err == nil {
+				s.resourceURL = baseURL.ResolveReference(locationURL).String()
+			} else {
+				s.resourceURL = location
+			}
+		} else {
+			s.resourceURL = location
+		}
+		log.Printf("WHIP: resource URL: %s", s.resourceURL)
+	}
+
+	log.Printf("WHIP: got SDP answer (%d bytes)", len(body))
 	answer := webrtc.SessionDescription{
 		Type: webrtc.SDPTypeAnswer,
 		SDP:  string(body),
 	}
 	if err := peerConnection.SetRemoteDescription(answer); err != nil {
+		log.Printf("WHIP: failed to set remote description: %v", err)
 		return err
 	}
 
@@ -320,10 +361,13 @@ func (s *WHIPSink) connect() error {
 		case webrtc.ICEConnectionStateDisconnected, webrtc.ICEConnectionStateFailed, webrtc.ICEConnectionStateClosed:
 			s.mu.Lock()
 			alreadyReconnecting := s.reconnecting
-			s.reconnecting = true
+			intentionallyClosed := s.closed
+			if !intentionallyClosed {
+				s.reconnecting = true
+			}
 			s.mu.Unlock()
 
-			if !alreadyReconnecting {
+			if !alreadyReconnecting && !intentionallyClosed {
 				log.Printf("WHIP connection lost, initiating reconnection...")
 				go s.reconnect()
 			}
@@ -416,10 +460,12 @@ func (s *WHIPSink) WriteH264(buf []byte, ptsMicroseconds int64) (int, error) {
 	reader := bytes.NewReader(buf)
 	h264Reader, err := h264reader.NewReader(reader)
 	if err != nil {
+		log.Printf("WHIP: failed to create h264reader for %d bytes: %v", len(buf), err)
 		return 0, fmt.Errorf("failed to create h264reader: %v", err)
 	}
 
 	nalCount := 0
+	rtpPacketCount := 0
 	for {
 		nal, err := h264Reader.NextNAL()
 		if err == io.EOF {
@@ -483,7 +529,13 @@ func (s *WHIPSink) WriteH264(buf []byte, ptsMicroseconds int64) (int, error) {
 			if err := videoTrack.track.WriteRTP(pkt); err != nil {
 				return 0, fmt.Errorf("error writing RTP packet: %v", err)
 			}
+			rtpPacketCount++
 		}
+	}
+
+	// Log stats every ~3 seconds (roughly 90 frames at 30fps)
+	if nalCount > 0 && videoTrack.ptsMicroseconds > 0 && (ptsMicroseconds-videoTrack.ptsMicroseconds) > 3000000 {
+		log.Printf("WHIP video: %d NALs, %d RTP packets, %d bytes input", nalCount, rtpPacketCount, len(buf))
 	}
 
 	videoTrack.ptsMicroseconds = ptsMicroseconds
@@ -497,7 +549,6 @@ func (s *WHIPSink) WriteH264(buf []byte, ptsMicroseconds int64) (int, error) {
 		if targetBitrate > maxBitrate {
 			targetBitrate = maxBitrate
 		}
-		log.Printf("Congestion control target bitrate: %d bps", targetBitrate)
 	}
 
 	return targetBitrate, nil
@@ -567,5 +618,44 @@ func (s *WHIPSink) SetPLICallback(callback func()) {
 }
 
 func (s *WHIPSink) Close() error {
+	// Mark as intentionally closed to prevent auto-reconnect
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+
+	// Send DELETE to WHIP resource URL to properly end the session
+	if s.resourceURL != "" {
+		req, err := http.NewRequest("DELETE", s.resourceURL, nil)
+		if err != nil {
+			log.Printf("WHIP: failed to create DELETE request: %v", err)
+		} else {
+			if s.bearerToken != "" {
+				req.Header.Set("Authorization", "Bearer "+s.bearerToken)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				log.Printf("WHIP: DELETE request failed: %v", err)
+			} else {
+				resp.Body.Close()
+				log.Printf("WHIP: DELETE returned %d", resp.StatusCode)
+			}
+		}
+	}
+
 	return s.pc.Close()
+}
+
+// GetICEConnectionState returns the current ICE connection state as a string
+func (s *WHIPSink) GetICEConnectionState() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.connectionState.String()
+}
+
+// GetPeerConnectionState returns the current peer connection state as a string
+func (s *WHIPSink) GetPeerConnectionState() string {
+	if s.pc == nil {
+		return "closed"
+	}
+	return s.pc.ConnectionState().String()
 }
