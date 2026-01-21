@@ -53,9 +53,9 @@ func NewUVCSource(fd int) (*UVCSource, error) {
 	}
 
 	return &UVCSource{
-        fd:         fd,
-        device:     device,
-    }, nil
+		fd:     fd,
+		device: device,
+	}, nil
 }
 
 // UVCStream represents an active video stream

@@ -368,12 +368,13 @@ class StreamingService : Service() {
             // Allow GCC to scale bitrate up to 7.5 Mbps
             setInteger("max-bitrate", 7_500_000)
 
-            // Enable B-frames for better quality
-            setInteger(MediaFormat.KEY_MAX_B_FRAMES, 3)
+            // Disable B-frames for consistent frame rate during high motion
+            setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
 
-            // Real-time priority but relaxed latency for quality
+            // Real-time priority with low latency to prevent encoder backup during high motion
             setInteger(MediaFormat.KEY_PRIORITY, 0) // Real-time priority (0 = real-time, 1 = non-real-time)
-            setInteger(MediaFormat.KEY_LATENCY, 15) // Allow 15 frame lookahead for better bit allocation
+            setInteger(MediaFormat.KEY_LOW_LATENCY, 1) // Prioritize throughput over quality
+            setInteger(MediaFormat.KEY_LATENCY, 3) // Small lookahead buffer to prevent blocking
             setInteger(MediaFormat.KEY_OPERATING_RATE, 60) // Higher than frame rate for headroom
 
             // Set profile/level based on codec
