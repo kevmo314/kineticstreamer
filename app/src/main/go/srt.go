@@ -14,22 +14,46 @@ package kinetic
 #include <stdint.h>
 #include <srt/srt.h>
 
-// Helper to get bandwidth from SRT stats
-static double srt_get_bandwidth_mbps(SRTSOCKET sock) {
-    SRT_TRACEBSTATS stats;
-    if (srt_bstats(sock, &stats, 0) == 0) {
-        return stats.mbpsBandwidth;
-    }
-    return 0.0;
-}
+// SRT stats for BBR-like bandwidth estimation
+typedef struct {
+    double msRTT;           // Round-trip time in ms
+    int pktFlightSize;      // Packets in flight (unacknowledged)
+    int pktSndLoss;         // Packets lost in interval
+    int64_t pktSndLossTotal; // Total packets lost
+    double mbpsSendRate;    // Current send rate in Mbps
+    int pktSndBuf;          // Packets in send buffer
+    double mbpsBandwidth;   // Estimated bandwidth from receiver
+    int pktCongestionWindow; // Congestion window size
+    int pktSndDrop;         // Packets dropped by sender (too late)
+    int64_t pktSndDropTotal; // Total packets dropped
+    int pktRetrans;         // Retransmitted packets in interval
+    int64_t pktRetransTotal; // Total retransmitted packets
+    int64_t pktSent;        // Total packets sent
+    double mbpsMaxBW;       // Maximum bandwidth setting
+} srt_bwe_stats_t;
 
-// Helper to get send loss from SRT stats
-static int srt_get_snd_loss(SRTSOCKET sock) {
+// Helper to get all stats needed for bandwidth estimation
+// Uses clear=1 to get interval-based stats (pktSndLoss resets each call)
+static int srt_get_bwe_stats(SRTSOCKET sock, srt_bwe_stats_t* out) {
     SRT_TRACEBSTATS stats;
-    if (srt_bstats(sock, &stats, 0) == 0) {
-        return stats.pktSndLoss;
+    if (srt_bstats(sock, &stats, 1) == 0) {
+        out->msRTT = stats.msRTT;
+        out->pktFlightSize = stats.pktFlightSize;
+        out->pktSndLoss = stats.pktSndLoss;
+        out->pktSndLossTotal = stats.pktSndLossTotal;
+        out->mbpsSendRate = stats.mbpsSendRate;
+        out->pktSndBuf = stats.pktSndBuf;
+        out->mbpsBandwidth = stats.mbpsBandwidth;
+        out->pktCongestionWindow = stats.pktCongestionWindow;
+        out->pktSndDrop = stats.pktSndDrop;
+        out->pktSndDropTotal = stats.pktSndDropTotal;
+        out->pktRetrans = stats.pktRetrans;
+        out->pktRetransTotal = stats.pktRetransTotal;
+        out->pktSent = stats.pktSent;
+        out->mbpsMaxBW = stats.mbpsMaxBW;
+        return 0;
     }
-    return 0;
+    return -1;
 }
 */
 import "C"
@@ -207,6 +231,18 @@ type SRTPLICallback interface {
 	OnPLI()
 }
 
+// Simple AIMD-style bandwidth estimation constants
+// Less aggressive than BBR to avoid congestion collapse on lossy links
+const (
+	minBitrateBps     = 1_500_000              // 1.5 Mbps minimum
+	maxBitrateBps     = 7_500_000              // 7.5 Mbps maximum
+	startBitrateBps   = 4_000_000              // 4 Mbps starting point
+	bweIncreaseBps    = 200_000                // Additive increase: +200 Kbps per probe
+	bweDecreaseFactor = 0.9                    // Multiplicative decrease: -10% on loss/congestion
+	bweProbeInterval  = 500 * time.Millisecond // Probe every 500ms
+	bweLossCooldown   = 2 * time.Second        // Wait 2s after loss before probing again
+)
+
 type SRTSink struct {
 	sync.Mutex
 
@@ -216,9 +252,11 @@ type SRTSink struct {
 	tracks      []*mpegts.Track
 	pliCallback SRTPLICallback
 
-	// For tracking packet loss
-	lastPktSndLoss    int64
-	lastLossCheckTime time.Time
+	// AIMD bandwidth estimation state
+	targetBitrate       int64     // Current target bitrate in bps
+	lastProbeTime       time.Time // Last time we probed/updated
+	lastLossTime        time.Time // Last time we saw packet loss
+	lastPktSndLossTotal int64     // For detecting new packet loss
 }
 
 var sinkCount int
@@ -341,7 +379,13 @@ func NewSRTSink(s, encodedMediaFormatMimeTypes string) (*SRTSink, error) {
 
 	bw := bufio.NewWriterSize(sck, int(payloadSize))
 	log.Printf("SRT: sink created with %d tracks", len(tracks))
-	return &SRTSink{mpw: mpegts.NewWriter(bw, tracks), bw: bw, sck: sck, tracks: tracks}, nil
+	return &SRTSink{
+		mpw:           mpegts.NewWriter(bw, tracks),
+		bw:            bw,
+		sck:           sck,
+		tracks:        tracks,
+		targetBitrate: startBitrateBps,
+	}, nil
 }
 
 
@@ -456,35 +500,88 @@ func (s *SRTSink) SetPLICallback(callback SRTPLICallback) {
 	s.pliCallback = callback
 }
 
-// GetStatsAndBandwidth returns the estimated bandwidth in bits per second
-// and triggers a PLI callback if packet loss is detected
+// GetStatsAndBandwidth returns the estimated target bandwidth in bits per second
+// using a simple AIMD algorithm: additive increase, multiplicative decrease.
+// Also triggers PLI callback on packet loss.
 func (s *SRTSink) GetStatsAndBandwidth() int64 {
 	s.Lock()
 	defer s.Unlock()
 
-	// Get bandwidth from SRT stats (in Mb/s)
-	bandwidthMbps := float64(C.srt_get_bandwidth_mbps(s.sck.fd))
-
-	// Convert Mb/s to bits/sec, cap at 7.5 Mbps max
-	bandwidthBps := int64(bandwidthMbps * 1000000)
-	const maxBandwidthBps = 7500000 // 7.5 Mbps cap
-	if bandwidthBps > maxBandwidthBps {
-		bandwidthBps = maxBandwidthBps
-	}
-
-	// Check for packet loss and trigger PLI if needed
-	currentLoss := int64(C.srt_get_snd_loss(s.sck.fd))
 	now := time.Now()
 
-	// Trigger PLI if we see new packet loss (check at most once per second)
-	if currentLoss > s.lastPktSndLoss && now.Sub(s.lastLossCheckTime) > time.Second {
-		if s.pliCallback != nil {
-			log.Printf("SRT: packet loss detected (%d -> %d), requesting keyframe", s.lastPktSndLoss, currentLoss)
-			go s.pliCallback.OnPLI() // Call asynchronously to avoid deadlock
-		}
-		s.lastPktSndLoss = currentLoss
-		s.lastLossCheckTime = now
+	// Rate limit probes
+	if !s.lastProbeTime.IsZero() && now.Sub(s.lastProbeTime) < bweProbeInterval {
+		return s.targetBitrate
+	}
+	s.lastProbeTime = now
+
+	// Get SRT stats
+	var stats C.srt_bwe_stats_t
+	if C.srt_get_bwe_stats(s.sck.fd, &stats) != 0 {
+		return s.targetBitrate
 	}
 
-	return bandwidthBps
+	lossTotal := int64(stats.pktSndLossTotal)
+	lossInterval := int(stats.pktSndLoss)
+	rtt := float64(stats.msRTT)
+	sendRateMbps := float64(stats.mbpsSendRate)
+	flightSize := int(stats.pktFlightSize)
+	sndBuf := int(stats.pktSndBuf)
+	estBwMbps := float64(stats.mbpsBandwidth)
+	cwnd := int(stats.pktCongestionWindow)
+	drops := int(stats.pktSndDrop)
+	dropsTotal := int64(stats.pktSndDropTotal)
+	retrans := int(stats.pktRetrans)
+	retransTotal := int64(stats.pktRetransTotal)
+
+	// Always log stats for debugging
+	log.Printf("SRT stats: RTT=%.0fms rate=%.2fMbps estBW=%.2fMbps cwnd=%d flight=%d sndbuf=%d",
+		rtt, sendRateMbps, estBwMbps, cwnd, flightSize, sndBuf)
+	log.Printf("SRT stats: loss=%d/%d retrans=%d/%d drops=%d/%d target=%dKbps",
+		lossInterval, lossTotal, retrans, retransTotal, drops, dropsTotal, s.targetBitrate/1000)
+
+	// Check for packet loss
+	if lossTotal > s.lastPktSndLossTotal {
+		lostPackets := lossTotal - s.lastPktSndLossTotal
+		s.lastPktSndLossTotal = lossTotal
+		s.lastLossTime = now
+
+		// Trigger PLI for keyframe
+		if s.pliCallback != nil {
+			go s.pliCallback.OnPLI()
+		}
+
+		// Multiplicative decrease on loss
+		oldBitrate := s.targetBitrate
+		s.targetBitrate = int64(float64(s.targetBitrate) * bweDecreaseFactor)
+		if s.targetBitrate < minBitrateBps {
+			s.targetBitrate = minBitrateBps
+		}
+
+		log.Printf("SRT BWE: LOSS (%d pkts) -> %d Kbps (was %d Kbps)",
+			lostPackets, s.targetBitrate/1000, oldBitrate/1000)
+		return s.targetBitrate
+	}
+	s.lastPktSndLossTotal = lossTotal
+
+	// Don't probe up during cooldown after loss
+	if !s.lastLossTime.IsZero() && now.Sub(s.lastLossTime) < bweLossCooldown {
+		log.Printf("SRT BWE: in cooldown (%.1fs since loss), holding at %d Kbps",
+			now.Sub(s.lastLossTime).Seconds(), s.targetBitrate/1000)
+		return s.targetBitrate
+	}
+
+	// Additive increase when stable
+	if s.targetBitrate < maxBitrateBps {
+		oldBitrate := s.targetBitrate
+		s.targetBitrate += bweIncreaseBps
+		if s.targetBitrate > maxBitrateBps {
+			s.targetBitrate = maxBitrateBps
+		}
+		log.Printf("SRT BWE: probe +%d Kbps -> %d Kbps",
+			bweIncreaseBps/1000, s.targetBitrate/1000)
+		_ = oldBitrate // silence unused warning
+	}
+
+	return s.targetBitrate
 }

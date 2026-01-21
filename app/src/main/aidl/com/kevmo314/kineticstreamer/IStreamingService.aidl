@@ -23,10 +23,12 @@ interface IStreamingService {
     
     // WebView overlay methods
     void setWebViewOverlay(in String url, int x, int y, int width, int height);
-    
+
     void updateWebViewOverlay(in String url, int x, int y, int width, int height);
-    
+
     void removeWebViewOverlay();
+
+    void refreshWebViewOverlay();
 
     // WHIP connection state methods
     String getWhipIceConnectionState();

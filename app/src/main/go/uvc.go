@@ -38,37 +38,6 @@ type FormatDescriptor struct {
 	FrameIndex           uint8
 }
 
-func (fd *FormatDescriptor) toString() string {
-	return fmt.Sprintf("%s %dx%d @%dns", fd.FormatName, fd.Width, fd.Height, fd.DefaultFrameInterval)
-}
-
-func getFormatName(format int) string {
-	switch format {
-	case UVC_FRAME_FORMAT_UNCOMPRESSED:
-		return "UNCOMPRESSED"
-	case UVC_FRAME_FORMAT_COMPRESSED:
-		return "COMPRESSED"
-	case UVC_FRAME_FORMAT_YUYV:
-		return "YUYV"
-	case UVC_FRAME_FORMAT_UYVY:
-		return "UYVY"
-	case UVC_FRAME_FORMAT_GRAY8:
-		return "GRAY8"
-	case UVC_FRAME_FORMAT_GRAY16:
-		return "GRAY16"
-	case UVC_FRAME_FORMAT_MJPEG:
-		return "MJPEG"
-	case UVC_FRAME_FORMAT_H264:
-		return "H264"
-	case UVC_FRAME_FORMAT_NV12:
-		return "NV12"
-	case UVC_FRAME_FORMAT_YUY2:
-		return "YUY2"
-	default:
-		return "UNKNOWN"
-	}
-}
-
 // UVCSource represents a UVC video source
 type UVCSource struct {
 	fd           int
@@ -78,8 +47,6 @@ type UVCSource struct {
 
 // NewUVCSource creates a new UVC source from a file descriptor
 func NewUVCSource(fd int) (*UVCSource, error) {
-	log.Printf("NewUVCSource: Creating UVC device from fd=%d", fd)
-
 	device, err := uvc.NewUVCDevice(uintptr(fd))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create UVC device: %v", err)
@@ -105,7 +72,7 @@ type UVCStream struct {
 func (s *UVCSource) StartStreaming(format, width, height, fps int) (*UVCStream, error) {
 	info, err := s.device.DeviceInfo()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("UVC DeviceInfo failed: %v", err)
 	}
 
 	for _, si := range info.StreamingInterfaces {
@@ -118,7 +85,8 @@ func (s *UVCSource) StartStreaming(format, width, height, fps int) (*UVCStream, 
             if err != nil || string(fourcc[:]) != "H264" {
                 continue
             }
-            frs := si.Descriptors[fdIndex+1 : fdIndex+int(NumFrameDescriptors(fd))+1]
+            numFrames := int(NumFrameDescriptors(fd))
+            frs := si.Descriptors[fdIndex+1 : fdIndex+numFrames+1]
             for _, fr := range frs {
                 fr, ok := fr.(*descriptors.FrameBasedFrameDescriptor)
                 if !ok {
@@ -130,23 +98,23 @@ func (s *UVCSource) StartStreaming(format, width, height, fps int) (*UVCStream, 
 
                 reader, err := si.ClaimFrameReader(fd.Index(), fr.Index())
                 if err != nil {
-                    log.Printf("Failed to claim frame reader: %v", err)
+                    log.Printf("UVC: ClaimFrameReader failed: %v", err)
                     continue
                 }
 
                 // Calculate frame interval and FPS
                 frameIntervalNanos := int64(fr.DefaultFrameInterval)
-                fps := 0.0
+                actualFps := 0.0
                 if frameIntervalNanos > 0 {
-                    fps = 1_000_000_000.0 / float64(frameIntervalNanos)
+                    actualFps = 1_000_000_000.0 / float64(frameIntervalNanos)
                 }
-                log.Printf("Frame interval: %d ns, FPS: %.2f", frameIntervalNanos, fps)
+                log.Printf("UVC: Started streaming 1920x1080 H264 @ %.1f fps", actualFps)
 
                 return &UVCStream{
                    reader:             reader,
                    buffer:             make([][]byte, 100),
                    frameIntervalNanos: frameIntervalNanos,
-                   fps:                fps,
+                   fps:                actualFps,
                    frameCount:         0,
                    lastPTSMicros:      0,
                }, nil
@@ -238,4 +206,17 @@ func (s *UVCStream) GetPTS() int64 {
 // Close stops the stream
 func (s *UVCStream) Close() error {
     return s.reader.Close()
+}
+
+// Close closes the UVC source
+func (s *UVCSource) Close() error {
+    if s.activeStream != nil {
+        s.activeStream.Close()
+        s.activeStream = nil
+    }
+    if s.device != nil {
+        s.device.Close()
+        s.device = nil
+    }
+    return nil
 }

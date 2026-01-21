@@ -24,6 +24,8 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
+import android.os.Looper
+import android.widget.Toast
 import android.os.PowerManager
 import android.net.wifi.WifiManager
 import android.provider.Settings as SystemSettings
@@ -39,6 +41,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.buffer
@@ -134,8 +138,8 @@ class StreamingService : Service() {
     private var webViewOverlay: WebViewOverlay? = null
     private var whipSink: WHIPSink? = null
     private var srtSink: SRTSink? = null
-    private var queue: ExecutorService? = null
-    private var lastBitrate: Int = 0 // Track last bitrate to avoid frequent updates
+    private var networkExecutor: ExecutorService? = null  // Dedicated thread for network writes
+    @Volatile private var lastBitrate: Int = 0 // Track last bitrate to avoid frequent updates
     private var videoFrameCount: Long = 0 // Counter for debug logging
     private var useOpusAudio: Boolean = true // Track audio codec: true=Opus (WHIP), false=AAC (SRT)
     private var audioFlowJob: Job? = null
@@ -214,7 +218,7 @@ class StreamingService : Service() {
         override fun stopStreaming() {
             // Update notification to show stopped status
             updateNotification("Ready to stream", false)
-            
+
             // Reset timestamp tracking
             streamStartTimeNanos = 0
             audioSampleCount = 0
@@ -224,14 +228,9 @@ class StreamingService : Service() {
             frameTimestamps.clear()
             latestFps = 0f
 
-            // Remove encoder surface from renderer (keep preview surface)
+            // Remove encoder surface from renderer (keep preview surface and overlay)
             renderer?.removeOutputSurface(videoEncoderInputSurface)
-            
-            // Release hardcoded WebView overlay
-            webViewOverlay?.release()
-            webViewOverlay = null
-            renderer?.removeOverlay()
-            
+
             // Stop and release video encoder
             videoEncoder?.stop()
             videoEncoderInputSurface?.release()
@@ -251,8 +250,8 @@ class StreamingService : Service() {
             srtSink = null
 
             // Clean up queue
-            queue?.shutdown()
-            queue = null
+            networkExecutor?.shutdown()
+            networkExecutor = null
             
             Log.i("StreamingService", "Streaming stopped and resources cleaned up")
         }
@@ -323,6 +322,11 @@ class StreamingService : Service() {
             Log.i("StreamingService", "WebView overlay removed")
         }
 
+        override fun refreshWebViewOverlay() {
+            webViewOverlay?.reload()
+            Log.i("StreamingService", "WebView overlay refresh requested")
+        }
+
         override fun getWhipIceConnectionState(): String {
             return whipSink?.getICEConnectionState() ?: "none"
         }
@@ -344,8 +348,11 @@ class StreamingService : Service() {
         useOpusAudio = whipEnabled || !srtEnabled  // Opus if WHIP enabled or no sinks configured
         Log.i("StreamingService", "Audio codec: ${if (useOpusAudio) "Opus" else "AAC"} (WHIP=$whipEnabled, SRT=$srtEnabled)")
 
-        // Hardcode H.264 video format optimized for ultra-low latency
-        val videoMediaFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, 1920, 1080).apply {
+        // Read video codec setting
+        val videoCodec = runBlocking { settings?.codec?.first() } ?: SupportedVideoCodec.H264
+        Log.i("StreamingService", "Video codec: $videoCodec (${videoCodec.mimeType})")
+
+        val videoMediaFormat = MediaFormat.createVideoFormat(videoCodec.mimeType, 1920, 1080).apply {
             val initialBitrate = 2000000  // 2 Mbps initial, adjusted dynamically by GCC
             setInteger(MediaFormat.KEY_BIT_RATE, initialBitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, 30)
@@ -358,25 +365,29 @@ class StreamingService : Service() {
             // CBR with frame drop for strict constant bitrate
             setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR_FD)
 
-            // Set max bitrate to prevent spikes (same as target for strict CBR)
-            setInteger("max-bitrate", initialBitrate)
+            // Allow GCC to scale bitrate up to 7.5 Mbps
+            setInteger("max-bitrate", 7_500_000)
 
-            // Disable B-frames for lower latency (P-frames only)
-//            setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+            // Enable B-frames for better quality
+            setInteger(MediaFormat.KEY_MAX_B_FRAMES, 3)
 
-            // Real-time priority and low-latency flags (Android 30+)
+            // Real-time priority but relaxed latency for quality
             setInteger(MediaFormat.KEY_PRIORITY, 0) // Real-time priority (0 = real-time, 1 = non-real-time)
-            setInteger(MediaFormat.KEY_LATENCY, 1) // Output after 1 frame queued (no buffering)
+            setInteger(MediaFormat.KEY_LATENCY, 15) // Allow 15 frame lookahead for better bit allocation
             setInteger(MediaFormat.KEY_OPERATING_RATE, 60) // Higher than frame rate for headroom
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                setInteger(
-                    MediaFormat.KEY_LOW_LATENCY,
-                    1
-                ) // Enable low-latency mode (1 = enabled, 0 = disabled)
-            }
 
-            setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline) // Baseline for max performance
-            setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel4)
+            // Set profile/level based on codec
+            when (videoCodec) {
+                SupportedVideoCodec.H264 -> {
+                    setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileHigh)
+                    setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel41)
+                }
+                SupportedVideoCodec.H265 -> {
+                    setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.HEVCProfileMain)
+                    setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.HEVCMainTierLevel41)
+                }
+                else -> { /* Use encoder defaults for VP8/VP9/AV1 */ }
+            }
         }
 
         // Create audio format based on selected codec
@@ -401,7 +412,7 @@ class StreamingService : Service() {
         } else {
             // AAC for SRT/MPEG-TS - mono, 48kHz, AAC-LC profile (mono to match audio source)
             MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, 48000, 1).apply {
-                setInteger(MediaFormat.KEY_BIT_RATE, 128000)
+                setInteger(MediaFormat.KEY_BIT_RATE, 192000)
                 setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
 
                 try {
@@ -410,7 +421,7 @@ class StreamingService : Service() {
                     Log.w("StreamingService", "AAC priority setting not supported: ${e.message}")
                 }
 
-                Log.i("StreamingService", "AAC encoder configured: 128kbps, AAC-LC, mono")
+                Log.i("StreamingService", "AAC encoder configured: 192kbps, AAC-LC, mono")
             }
         }
 
@@ -426,19 +437,27 @@ class StreamingService : Service() {
             when {
                 config.url.startsWith("srt://") -> {
                     Log.i("StreamingService", "Creating SRT sink for ${config.url}")
-                    srtSink = SRTSink(config.url, mimeTypes)
+                    try {
+                        srtSink = SRTSink(config.url, mimeTypes)
 
-                    // Set up PLI callback to request keyframes on packet loss
-                    srtSink?.setPLICallback(object : PLICallback {
-                        override fun onPLI() {
-                            Log.d("StreamingService", "SRT PLI received, requesting keyframe")
-                            videoEncoder?.let { encoder ->
-                                val params = Bundle()
-                                params.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
-                                encoder.setParameters(params)
+                        // Set up PLI callback to request keyframes on packet loss
+                        srtSink?.setPLICallback(object : PLICallback {
+                            override fun onPLI() {
+                                Log.d("StreamingService", "SRT PLI received, requesting keyframe")
+                                videoEncoder?.let { encoder ->
+                                    val params = Bundle()
+                                    params.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+                                    encoder.setParameters(params)
+                                }
                             }
+                        })
+                    } catch (e: Exception) {
+                        Log.e("StreamingService", "Failed to create SRT sink: ${e.message}", e)
+                        Handler(Looper.getMainLooper()).post {
+                            Toast.makeText(this@StreamingService, "SRT connection failed: ${e.message}", Toast.LENGTH_LONG).show()
                         }
-                    })
+                        return
+                    }
                 }
                 config.url.startsWith("whip://") || config.url.startsWith("https://") || config.url.startsWith("http://") -> {
                     // WHIP sink - strip whip:// prefix and extract token from query params
@@ -452,19 +471,28 @@ class StreamingService : Service() {
                         }
                     }.build().toString()
                     Log.i("StreamingService", "Creating WHIP sink for $cleanUrl with token=${token.take(4)}...")
-                    whipSink = WHIPSink(cleanUrl, token, mimeTypes)
+                    try {
+                        whipSink = WHIPSink(cleanUrl, token, mimeTypes)
 
-                    // Set up PLI callback to request keyframes
-                    whipSink?.setPLICallback(object : PLICallback {
-                        override fun onPLI() {
-                            Log.d("StreamingService", "PLI received, requesting keyframe")
-                            videoEncoder?.let { encoder ->
-                                val params = Bundle()
-                                params.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
-                                encoder.setParameters(params)
+                        // Set up PLI callback to request keyframes
+                        whipSink?.setPLICallback(object : PLICallback {
+                            override fun onPLI() {
+                                Log.d("StreamingService", "PLI received, requesting keyframe")
+                                videoEncoder?.let { encoder ->
+                                    val params = Bundle()
+                                    params.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+                                    encoder.setParameters(params)
+                                }
                             }
+                        })
+                    } catch (e: Exception) {
+                        Log.e("StreamingService", "Failed to create WHIP sink: ${e.message}", e)
+                        Handler(Looper.getMainLooper()).post {
+                            Toast.makeText(this@StreamingService, "WHIP connection failed: ${e.message}", Toast.LENGTH_LONG).show()
                         }
-                    })
+                        // Clean up and return - don't start streaming without a working sink
+                        return
+                    }
                 }
                 else -> {
                     Log.w("StreamingService", "Unknown output protocol: ${config.url}")
@@ -472,7 +500,9 @@ class StreamingService : Service() {
             }
         }
 
-        queue = Executors.newSingleThreadExecutor()
+        networkExecutor = Executors.newSingleThreadExecutor { r ->
+            Thread(r, "NetworkWriter").apply { priority = Thread.MAX_PRIORITY }
+        }
 
         var initialTimestamp: Long = 0
         var frameCount = 0
@@ -502,63 +532,63 @@ class StreamingService : Service() {
                     }
                     val ts = info.presentationTimeUs - initialTimestamp
 
-                    // Process immediately for ultra-low latency (no queuing)
-                    try {
-                        // Write to WHIP sink if configured
-                        val gccTargetBitrate = whipSink?.writeH264(array, ts) ?: 0
+                    // Queue network writes on dedicated thread to avoid blocking encoder
+                    val flags = info.flags
+                    networkExecutor?.execute {
+                        try {
+                            // Write to WHIP sink if configured
+                            val gccBitrate = whipSink?.writeH264(array, ts) ?: 0
 
-                        // Write to SRT sink if configured
-                        srtSink?.writeSample(0, array, ts, info.flags)
+                            // Write to SRT sink if configured
+                            srtSink?.writeSample(0, array, ts, flags)
 
-                        // Get SRT bandwidth estimate (in bps)
-                        val srtBandwidth = srtSink?.getEstimatedBandwidth() ?: 0L
+                            // Get SRT bandwidth estimate (in bps)
+                            val srtBandwidth = srtSink?.getEstimatedBandwidth() ?: 0L
 
-                        frameCount++
-                        val now = System.nanoTime()
-                        val interFrameMs = if (lastFrameTime > 0) (now - lastFrameTime) / 1_000_000 else 0
-                        lastFrameTime = now
-
-                        // Log timing every 90 frames (~3 sec at 30fps)
-                        if (frameCount % 90 == 0) {
-                            val effectiveFps = if (interFrameMs > 0) 1000.0 / interFrameMs else 0.0
-                            Log.i("StreamingService", "Encoder: frame=$frameCount, ${String.format("%.1f", effectiveFps)}fps, ${array.size/1024}KB" +
-                                if (srtBandwidth > 0) ", SRT BW=${srtBandwidth/1000}Kbps" else "")
-                        }
-
-                        // Update encoder bitrate based on bandwidth estimation
-                        // Use WHIP GCC if available, otherwise use SRT bandwidth
-                        val targetBitrate = when {
-                            gccTargetBitrate > 0 -> gccTargetBitrate
-                            srtBandwidth > 0 -> srtBandwidth.toInt()
-                            else -> 0
-                        }
-
-                        // Subtract fixed audio bitrate (64 Kbps Opus) from GCC total estimate
-                        val audioBitrate = 64000
-                        val encoderBitrate = maxOf(targetBitrate - audioBitrate, 100000) // Min 100 Kbps video
-                        if (encoderBitrate > 0) {
-                            val diff = kotlin.math.abs(encoderBitrate - lastBitrate)
-                            // Debug: log every 100 frames
-                            videoFrameCount++
-                            if (videoFrameCount % 100 == 0L) {
-                                Log.d("StreamingService", "Bitrate check: gcc=$gccTargetBitrate encoder=$encoderBitrate last=$lastBitrate")
+                            // Update encoder bitrate based on bandwidth estimation
+                            val targetBitrate = when {
+                                gccBitrate > 0 -> gccBitrate
+                                srtBandwidth > 0 -> srtBandwidth.toInt()
+                                else -> 0
                             }
-                            if (diff > lastBitrate * 0.05) {
-                                videoEncoder?.let { encoder ->
-                                    val params = Bundle()
-                                    params.putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, encoderBitrate)
-                                    encoder.setParameters(params)
-                                    Log.i("StreamingService", "Bitrate: GCC=${targetBitrate/1000}Kbps - Audio=${audioBitrate/1000}Kbps -> Video=${encoderBitrate/1000}Kbps")
-                                    lastBitrate = encoderBitrate
+
+                            if (targetBitrate > 0) {
+                                // Subtract audio bitrate from total estimate (Opus=64Kbps, AAC=192Kbps)
+                                val audioBitrate = if (useOpusAudio) 64000 else 192000
+                                val encoderBitrate = maxOf(targetBitrate - audioBitrate, 100000)
+                                val diff = kotlin.math.abs(encoderBitrate - lastBitrate)
+                                if (diff > lastBitrate * 0.05) {
+                                    videoEncoder?.let { encoder ->
+                                        val params = Bundle()
+                                        params.putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, encoderBitrate)
+                                        encoder.setParameters(params)
+                                        Log.i("StreamingService", "Bitrate: target=${targetBitrate/1000}Kbps - Audio=${audioBitrate/1000}Kbps -> Video=${encoderBitrate/1000}Kbps")
+                                        lastBitrate = encoderBitrate
+                                    }
                                 }
                             }
+                        } catch (e: Exception) {
+                            Log.e("StreamingService", "Error writing H264 data: ${e.message}")
                         }
-
-                        // Track frame for FPS calculation
-                        updateFpsTracking()
-                    } catch (e: Exception) {
-                        Log.e("StreamingService", "Error writing H264 data: ${e.message}")
                     }
+
+                    // Update stats on encoder thread (non-blocking)
+                    frameCount++
+                    val now = System.nanoTime()
+                    val interFrameMs = if (lastFrameTime > 0) (now - lastFrameTime) / 1_000_000 else 0
+                    lastFrameTime = now
+
+                    // Log timing every 90 frames (~3 sec at 30fps)
+                    if (frameCount % 90 == 0) {
+                        val effectiveFps = if (interFrameMs > 0) 1000.0 / interFrameMs else 0.0
+                        Log.i("StreamingService", "Encoder: frame=$frameCount, ${String.format("%.1f", effectiveFps)}fps, ${array.size/1024}KB, bitrate=${lastBitrate/1000}Kbps")
+                    }
+
+                    // Debug: log every 100 frames
+                    videoFrameCount++
+
+                    // Track frame for FPS calculation
+                    updateFpsTracking()
 
                     try {
                         codec.releaseOutputBuffer(index, false)
@@ -671,19 +701,22 @@ class StreamingService : Service() {
                             Log.i("StreamingService", "Audio OUTPUT: frame=$audioOutputCount, aacSize=${array.size}, pts=${info.presentationTimeUs}")
                         }
 
-                        // Process immediately for ultra-low latency (no queuing)
-                        // Route audio to appropriate sinks based on codec
-                        try {
-                            if (useOpusAudio) {
-                                // Opus mode - write to WHIP (WebRTC) and SRT (if configured)
-                                whipSink?.writeOpus(array, info.presentationTimeUs)
-                                srtSink?.writeSample(1, array, info.presentationTimeUs, info.flags)
-                            } else {
-                                // AAC mode - only SRT supports AAC in MPEG-TS
-                                srtSink?.writeSample(1, array, info.presentationTimeUs, info.flags)
+                        // Queue network writes on dedicated thread to avoid blocking encoder
+                        val pts = info.presentationTimeUs
+                        val flags = info.flags
+                        networkExecutor?.execute {
+                            try {
+                                if (useOpusAudio) {
+                                    // Opus mode - write to WHIP (WebRTC) and SRT (if configured)
+                                    whipSink?.writeOpus(array, pts)
+                                    srtSink?.writeSample(1, array, pts, flags)
+                                } else {
+                                    // AAC mode - only SRT supports AAC in MPEG-TS
+                                    srtSink?.writeSample(1, array, pts, flags)
+                                }
+                            } catch (e: Exception) {
+                                Log.e("StreamingService", "Error writing audio data: ${e.message}", e)
                             }
-                        } catch (e: Exception) {
-                            Log.e("StreamingService", "Error writing audio data: ${e.message}", e)
                         }
 
                         codec.releaseOutputBuffer(index, false)
@@ -707,6 +740,8 @@ class StreamingService : Service() {
 
         videoEncoder?.start()
         audioEncoder?.start()
+
+        lastBitrate = 2000000 // Start at 2 Mbps
     }
 
     private fun setupDebugAudioPlayback() {
@@ -849,7 +884,9 @@ class StreamingService : Service() {
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .build()
 
-        startForeground(68448, notification)
+        startForeground(68448, notification,
+            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or
+            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
 
         // Acquire wake lock to keep CPU running when screen is off
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -877,6 +914,10 @@ class StreamingService : Service() {
         renderer = SurfaceTextureRenderer()
         renderer?.addOutputSurface(previewSurface)
 
+        // Apply 180° rotation setting if enabled
+        val rotate180 = runBlocking { settings!!.rotateVideo180.first() }
+        renderer?.setRotate180(rotate180)
+
         // Check for overlay permission before initializing WebView overlay
         webViewOverlay = WebViewOverlay(applicationContext)
         webViewOverlay?.setRenderer(renderer)
@@ -896,14 +937,34 @@ class StreamingService : Service() {
             deviceRefreshTrigger.onStart { emit(Unit) } // Emit initial value to start flow
         ) { identifier, _ -> identifier }
         .map { identifier ->
-            if (identifier == null) return@map null
             val usbManager = this.getSystemService(USB_SERVICE) as UsbManager
-            val device = VideoSourceDevice.fromIdentifier(identifier, usbManager.deviceList.values.toList())
-            if (device != null) {
-                Log.i("StreamingService", "USB device found: ${device}")
-                return@map device
+            val usbDevices = usbManager.deviceList.values.toList()
+
+            // Debug: log all USB devices
+            Log.i("StreamingService", "USB devices available: ${usbDevices.size}")
+            for (usb in usbDevices) {
+                Log.i("StreamingService", "  - ${usb.productName} (id=${usb.deviceId}, isUvc=${usb.isUvc()})")
             }
-            Log.w("StreamingService", "USB device not found, falling back to camera")
+
+            // First try to find by stored identifier
+            if (identifier != null) {
+                Log.i("StreamingService", "Looking for identifier: $identifier")
+                val device = VideoSourceDevice.fromIdentifier(identifier, usbDevices)
+                if (device != null) {
+                    Log.i("StreamingService", "USB device found by identifier: ${device}")
+                    return@map device
+                }
+            }
+
+            // If stored identifier not found, check for any available UVC camera
+            val uvcCamera = usbDevices.firstOrNull { it.isUvc() }
+            if (uvcCamera != null) {
+                Log.i("StreamingService", "Found UVC camera, using: ${uvcCamera.productName}")
+                return@map VideoSourceDevice.UsbCamera(uvcCamera)
+            }
+
+            // Fall back to internal camera only if no UVC cameras available
+            Log.w("StreamingService", "No USB camera found (checked ${usbDevices.size} devices), falling back to internal camera")
             val cameraManager = getSystemService(CAMERA_SERVICE) as CameraManager
             val defaultDevice = cameraManager.cameraIdList.firstOrNull()
             if (defaultDevice != null) {
@@ -941,20 +1002,15 @@ class StreamingService : Service() {
                 return@flatMapLatest emptyFlow()
             }
             Log.i("StreamingService", "Creating VideoSource for device: $device")
-            VideoSource(this, device)
+            // Pass renderer for direct rendering (avoids frame duplication/dropping)
+            VideoSource(this, device, renderer)
         }
-        .buffer(Channel.CONFLATED) // Only keep latest frame to minimize latency
         .onEach { surfaceTexture ->
-            // Capture the SurfaceTexture timestamp for synchronization (only if streaming)
+            // Direct rendering mode: frames are rendered automatically on GL thread
+            // This callback just tracks timestamp for synchronization
             val frameTimestampNanos = surfaceTexture.timestamp
             if (frameTimestampNanos > 0 && videoEncoder != null) {
                 lastVideoTimestampNanos = frameTimestampNanos
-            }
-            
-            // Render the SurfaceTexture to all active output surfaces
-            // Must use Main thread for OpenGL operations with SurfaceTexture
-            withContext(Dispatchers.Main) {
-                renderer?.renderFrame(surfaceTexture)
             }
         }
         .launchIn(videoScope)
@@ -1107,8 +1163,8 @@ class StreamingService : Service() {
         srtSink?.close()
         srtSink = null
 
-        queue?.shutdown()
-        queue = null
+        networkExecutor?.shutdown()
+        networkExecutor = null
         
         // Release WebView overlay
         webViewOverlay?.release()

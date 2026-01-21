@@ -11,6 +11,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Divider
@@ -58,6 +59,7 @@ fun CodecRadioButton(
 @Composable
 fun SettingsScreen(
     settings: Settings,
+    streamingService: IStreamingService?,
     navigateBack: () -> Unit,
     navigateTo: (String) -> Unit,
 ) {
@@ -208,6 +210,49 @@ fun SettingsScreen(
                         )
                     }
                 }
+            }
+
+            val rotateVideo = settings.rotateVideo180.collectAsState(initial = false)
+
+            Surface(onClick = {
+                runBlocking { settings.setRotateVideo180(!rotateVideo.value) }
+            }) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Checkbox(checked = rotateVideo.value, onCheckedChange = {
+                        runBlocking { settings.setRotateVideo180(it) }
+                    })
+                    Column(modifier = Modifier.padding(start = 8.dp)) {
+                        Text("Rotate video 180°")
+                        Text(
+                            "For upside-down camera mounting",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
+            Divider()
+
+            Text("Overlay", modifier = Modifier.padding(16.dp))
+
+            Surface(onClick = {
+                streamingService?.refreshWebViewOverlay()
+            }) {
+                ListItem(
+                    headlineContent = { Text("Refresh Overlay") },
+                    supportingContent = { Text("Reload the WebView overlay content") },
+                    leadingContent = {
+                        Icon(
+                            imageVector = Icons.Filled.Refresh,
+                            contentDescription = "Refresh overlay"
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
         }
     }

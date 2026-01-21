@@ -73,6 +73,7 @@ class Settings(private val dataStore: DataStore<Preferences>) {
     private val _selectedVideoDevice = stringPreferencesKey("selected_video_device")
     private val _selectedAudioDevice = intPreferencesKey("selected_audio_device_id")
     private val _autoOpenOnUsbCamera = booleanPreferencesKey("auto_open_on_usb_camera")
+    private val _rotateVideo180 = booleanPreferencesKey("rotate_video_180")
 
     val codec = dataStore.data
          .map { SupportedVideoCodec.valueOf(it[_codec] ?: SupportedVideoCodec.H264.name) }
@@ -143,6 +144,12 @@ class Settings(private val dataStore: DataStore<Preferences>) {
 
     suspend fun setAutoOpenOnUsbCamera(enabled: Boolean) {
         dataStore.edit { it[_autoOpenOnUsbCamera] = enabled }
+    }
+
+    val rotateVideo180 = dataStore.data.map { it[_rotateVideo180] ?: false }
+
+    suspend fun setRotateVideo180(enabled: Boolean) {
+        dataStore.edit { it[_rotateVideo180] = enabled }
     }
 
     suspend fun getStreamingConfiguration(): StreamingConfiguration {

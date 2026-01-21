@@ -48,10 +48,11 @@ class WebViewSurfaceCapture {
     private var captureHeight: Int = 0
 
     /**
-     * Initialize the capture system
+     * Initialize the capture system with an externally-provided SurfaceTexture.
+     * The SurfaceTexture should be created on the GL thread with a valid texture ID.
      */
-    fun initialize(width: Int, height: Int, context: Context) {
-        Log.i(TAG, "initialize() called with width=$width, height=$height")
+    fun initialize(width: Int, height: Int, context: Context, externalSurfaceTexture: android.graphics.SurfaceTexture? = null) {
+        Log.i(TAG, "initialize() called with width=$width, height=$height, externalSurfaceTexture=$externalSurfaceTexture")
         captureWidth = width
         captureHeight = height
 
@@ -77,27 +78,34 @@ class WebViewSurfaceCapture {
             }, captureHandler)
         }
 
-        // Create OpenGL external texture for the captured content
-        val textures = IntArray(1)
-        android.opengl.GLES20.glGenTextures(1, textures, 0)
-        textureId = textures[0]
-        Log.i(TAG, "Created OpenGL external texture with ID $textureId")
+        // Use external SurfaceTexture if provided (created on GL thread with valid texture)
+        if (externalSurfaceTexture != null) {
+            surfaceTexture = externalSurfaceTexture
+            textureId = -1 // Mark as external (we don't own it)
+            Log.i(TAG, "Using external SurfaceTexture")
+        } else {
+            // Fallback: Create our own texture (may fail without GL context)
+            val textures = IntArray(1)
+            android.opengl.GLES20.glGenTextures(1, textures, 0)
+            textureId = textures[0]
+            Log.i(TAG, "Created OpenGL external texture with ID $textureId")
 
-        // Bind as external texture and set parameters
-        android.opengl.GLES20.glBindTexture(android.opengl.GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
-        android.opengl.GLES20.glTexParameteri(android.opengl.GLES11Ext.GL_TEXTURE_EXTERNAL_OES, android.opengl.GLES20.GL_TEXTURE_MIN_FILTER, android.opengl.GLES20.GL_LINEAR)
-        android.opengl.GLES20.glTexParameteri(android.opengl.GLES11Ext.GL_TEXTURE_EXTERNAL_OES, android.opengl.GLES20.GL_TEXTURE_MAG_FILTER, android.opengl.GLES20.GL_LINEAR)
-        android.opengl.GLES20.glTexParameteri(android.opengl.GLES11Ext.GL_TEXTURE_EXTERNAL_OES, android.opengl.GLES20.GL_TEXTURE_WRAP_S, android.opengl.GLES20.GL_CLAMP_TO_EDGE)
-        android.opengl.GLES20.glTexParameteri(android.opengl.GLES11Ext.GL_TEXTURE_EXTERNAL_OES, android.opengl.GLES20.GL_TEXTURE_WRAP_T, android.opengl.GLES20.GL_CLAMP_TO_EDGE)
+            // Bind as external texture and set parameters
+            android.opengl.GLES20.glBindTexture(android.opengl.GLES11Ext.GL_TEXTURE_EXTERNAL_OES, textureId)
+            android.opengl.GLES20.glTexParameteri(android.opengl.GLES11Ext.GL_TEXTURE_EXTERNAL_OES, android.opengl.GLES20.GL_TEXTURE_MIN_FILTER, android.opengl.GLES20.GL_LINEAR)
+            android.opengl.GLES20.glTexParameteri(android.opengl.GLES11Ext.GL_TEXTURE_EXTERNAL_OES, android.opengl.GLES20.GL_TEXTURE_MAG_FILTER, android.opengl.GLES20.GL_LINEAR)
+            android.opengl.GLES20.glTexParameteri(android.opengl.GLES11Ext.GL_TEXTURE_EXTERNAL_OES, android.opengl.GLES20.GL_TEXTURE_WRAP_S, android.opengl.GLES20.GL_CLAMP_TO_EDGE)
+            android.opengl.GLES20.glTexParameteri(android.opengl.GLES11Ext.GL_TEXTURE_EXTERNAL_OES, android.opengl.GLES20.GL_TEXTURE_WRAP_T, android.opengl.GLES20.GL_CLAMP_TO_EDGE)
 
-        // Create SurfaceTexture from the external texture
-        surfaceTexture = android.graphics.SurfaceTexture(textureId)
-        surfaceTexture?.setDefaultBufferSize(width, height)
+            // Create SurfaceTexture from the external texture
+            surfaceTexture = android.graphics.SurfaceTexture(textureId)
+            surfaceTexture?.setDefaultBufferSize(width, height)
+        }
 
         // Create a Surface from the SurfaceTexture for rendering
         surface = Surface(surfaceTexture)
 
-        Log.i(TAG, "WebViewSurfaceCapture initialized with size ${width}x${height}, SurfaceTexture created with listener")
+        Log.i(TAG, "WebViewSurfaceCapture initialized with size ${width}x${height}")
     }
 
     /**

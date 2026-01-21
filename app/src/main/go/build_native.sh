@@ -56,6 +56,14 @@ if [ ! -d "$INCLUDE_DIR/openssl" ]; then
     fi
 fi
 
+# Copy SCReAM headers
+if [ ! -d "$INCLUDE_DIR/scream" ]; then
+    if [ -d "$THIRD_PARTY_DIR/arm64-v8a/include/scream" ]; then
+        echo "Copying SCReAM headers..."
+        cp -r "$THIRD_PARTY_DIR/arm64-v8a/include/scream" "$INCLUDE_DIR/"
+    fi
+fi
+
 # Function to build for a specific architecture
 build_arch() {
     local ARCH=$1
@@ -78,7 +86,7 @@ build_arch() {
     export CXX="${ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin/${CC_PREFIX}${ANDROID_API}-clang++"
     # Include paths for all third-party libraries
     export CGO_CFLAGS="-I$INCLUDE_DIR -I$THIRD_PARTY_DIR/$ARCH/include -D__ANDROID__"
-    export CGO_LDFLAGS="-L$THIRD_PARTY_DIR/$ARCH/lib -lusb-1.0 -lsrt -lcrypto -lssl"
+    export CGO_LDFLAGS="-L$THIRD_PARTY_DIR/$ARCH/lib -lusb-1.0 -lsrt -lcrypto -lssl -lscream -static-libstdc++"
     
     # Build the shared library
     # Note: Go will compile both the Go and C files together

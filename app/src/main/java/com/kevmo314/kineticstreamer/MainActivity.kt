@@ -133,6 +133,7 @@ class MainActivity : ComponentActivity() {
                     composable("settings") {
                         SettingsScreen(
                             settings = settings,
+                            streamingService = streamingService.value,
                             navigateBack = {
                                 navController.popBackStack()
                             },

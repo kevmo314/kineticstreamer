@@ -5,15 +5,19 @@ import android.opengl.EGL14
 import android.opengl.EGLConfig
 import android.opengl.EGLContext
 import android.opengl.EGLDisplay
+import android.opengl.EGLExt
 import android.opengl.EGLSurface
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.opengl.Matrix
+import android.os.Handler
+import android.os.HandlerThread
 import android.util.Log
 import android.view.Surface
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
+import java.util.concurrent.CountDownLatch
 
 /**
  * Efficient OpenGL renderer that takes a SurfaceTexture and renders it to multiple output surfaces
@@ -43,13 +47,22 @@ class SurfaceTextureRenderer {
             uniform samplerExternalOES uTexture;
             uniform samplerExternalOES uOverlayTexture;
             uniform int uHasOverlay;
+            uniform int uRotate180;
+            uniform float uPaddingOffset; // Padding offset for rotation (precalculated from integers)
             uniform vec4 uOverlayBounds; // x, y, width, height in normalized coordinates
             uniform mat4 uOverlayTextureMatrix;
             void main() {
-                vec4 videoColor = texture2D(uTexture, vTextureCoord);
+                // Apply 180 rotation only to video texture sampling
+                vec2 videoCoord = vTextureCoord;
+                if (uRotate180 == 1) {
+                    // When rotating, shift Y to avoid sampling from padding area
+                    // The padding is at the bottom of the buffer, which becomes top after flip
+                    videoCoord = vec2(1.0 - vTextureCoord.x, 1.0 - vTextureCoord.y - uPaddingOffset);
+                }
+                vec4 videoColor = texture2D(uTexture, videoCoord);
 
                 if (uHasOverlay == 1) {
-                    // Convert texture coordinates to screen space [0,1]
+                    // Use original texture coordinates for overlay positioning (not rotated)
                     vec2 screenCoord = vTextureCoord;
 
                     // Check if current pixel is within overlay bounds
@@ -99,6 +112,10 @@ class SurfaceTextureRenderer {
         )
     }
 
+    // Dedicated GL thread for rendering
+    private val glThread = HandlerThread("GLRenderer").apply { start() }
+    val glHandler = Handler(glThread.looper)
+
     private var eglDisplay: EGLDisplay = EGL14.EGL_NO_DISPLAY
     private var eglContext: EGLContext = EGL14.EGL_NO_CONTEXT
     private var eglConfig: EGLConfig? = null
@@ -112,6 +129,8 @@ class SurfaceTextureRenderer {
     private var hasOverlayUniformHandle = 0
     private var overlayBoundsUniformHandle = 0
     private var overlayTextureMatrixHandle = 0
+    private var rotate180UniformHandle = 0
+    private var paddingOffsetUniformHandle = 0
 
     private var vertexBuffer: FloatBuffer
     private var textureBuffer: FloatBuffer
@@ -126,12 +145,20 @@ class SurfaceTextureRenderer {
     private val overlayTextureMatrix = FloatArray(16)
     private var hasOverlay = false
 
+    // 180° rotation support for upside-down camera mounting
+    @Volatile
+    private var rotate180 = false
+
+    // Synthetic timestamp support for smooth encoder timing
+    private var frameCount = 0L
+    private val frameIntervalNs = 33_333_333L // 30fps = ~33.33ms per frame
+
     @Volatile
     private var isInitialized = false
     private val initLock = Object()
 
     init {
-        // Initialize vertex buffers
+        // Initialize vertex buffers (can be done on any thread)
         vertexBuffer = ByteBuffer.allocateDirect(QUAD_VERTICES.size * 4)
             .order(ByteOrder.nativeOrder())
             .asFloatBuffer()
@@ -146,11 +173,16 @@ class SurfaceTextureRenderer {
 
         Matrix.setIdentityM(textureMatrix, 0)
 
-        // Initialize EGL immediately on creation
-        setupEGL()
-        setupShaders()
+        // Initialize EGL on the GL thread (GL context is thread-bound)
+        val latch = CountDownLatch(1)
+        glHandler.post {
+            setupEGL()
+            setupShaders()
+            latch.countDown()
+        }
+        latch.await() // Wait for GL init to complete
 
-        Log.i(TAG, "SurfaceTextureRenderer initialized")
+        Log.i(TAG, "SurfaceTextureRenderer initialized on GL thread")
     }
 
     private fun setupEGL() {
@@ -241,6 +273,8 @@ class SurfaceTextureRenderer {
         hasOverlayUniformHandle = GLES20.glGetUniformLocation(program, "uHasOverlay")
         overlayBoundsUniformHandle = GLES20.glGetUniformLocation(program, "uOverlayBounds")
         overlayTextureMatrixHandle = GLES20.glGetUniformLocation(program, "uOverlayTextureMatrix")
+        rotate180UniformHandle = GLES20.glGetUniformLocation(program, "uRotate180")
+        paddingOffsetUniformHandle = GLES20.glGetUniformLocation(program, "uPaddingOffset")
 
         // Clean up temp surface
         EGL14.eglDestroySurface(eglDisplay, tempSurface)
@@ -323,7 +357,68 @@ class SurfaceTextureRenderer {
     }
 
     /**
-     * Set overlay texture and bounds
+     * Create an overlay texture on the GL thread and return its SurfaceTexture.
+     * This must be called to get a valid texture for overlay rendering.
+     */
+    fun createOverlayTexture(width: Int, height: Int): SurfaceTexture {
+        val latch = CountDownLatch(1)
+        var result: SurfaceTexture? = null
+
+        glHandler.post {
+            // Generate texture on GL thread where we have context
+            val textures = IntArray(1)
+            GLES20.glGenTextures(1, textures, 0)
+            overlayTextureId = textures[0]
+
+            // Bind and configure the texture
+            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, overlayTextureId)
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+
+            // Create SurfaceTexture from the texture
+            val st = SurfaceTexture(overlayTextureId)
+            st.setDefaultBufferSize(width, height)
+
+            // Set up frame listener
+            st.setOnFrameAvailableListener {
+                overlayFrameAvailable = true
+            }
+
+            overlayTexture = st
+            result = st
+
+            Log.i(TAG, "Created overlay texture on GL thread with ID $overlayTextureId, size ${width}x${height}")
+            latch.countDown()
+        }
+
+        latch.await()
+        return result!!
+    }
+
+    /**
+     * Set overlay bounds (use after createOverlayTexture)
+     */
+    fun setOverlayBounds(x: Int, y: Int, width: Int, height: Int, screenWidth: Int, screenHeight: Int) {
+        Log.i(TAG, "setOverlayBounds() called: bounds=($x,$y,${width}x${height}), screen=${screenWidth}x${screenHeight}")
+
+        // Convert pixel coordinates to normalized coordinates [0,1]
+        // Mirror X position to account for video coordinate system
+        overlayBounds[0] = 1.0f - (x.toFloat() + width.toFloat()) / screenWidth.toFloat() // x (mirrored left edge)
+        overlayBounds[1] = y.toFloat() / screenHeight.toFloat() // y (top edge in screen coords)
+        overlayBounds[2] = width.toFloat() / screenWidth.toFloat() // width
+        overlayBounds[3] = height.toFloat() / screenHeight.toFloat() // height
+
+        // Initialize overlay texture matrix (identity matrix)
+        Matrix.setIdentityM(overlayTextureMatrix, 0)
+
+        hasOverlay = overlayTextureId != 0
+        Log.i(TAG, "Overlay bounds set: pixel coords=($x, $y, $width, $height), normalized bounds=(${overlayBounds[0]}, ${overlayBounds[1]}, ${overlayBounds[2]}, ${overlayBounds[3]}), hasOverlay=$hasOverlay")
+    }
+
+    /**
+     * Set overlay texture and bounds (legacy method)
      */
     fun setOverlay(overlayTextureId: Int, overlayTexture: SurfaceTexture?, x: Int, y: Int, width: Int, height: Int, screenWidth: Int, screenHeight: Int) {
         Log.i(TAG, "setOverlay() called: textureId=$overlayTextureId, surfaceTexture=$overlayTexture, bounds=($x,$y,${width}x${height}), screen=${screenWidth}x${screenHeight}")
@@ -360,6 +455,52 @@ class SurfaceTextureRenderer {
         hasOverlay = false
     }
 
+    /**
+     * Set 180° rotation for upside-down camera mounting
+     */
+    fun setRotate180(enabled: Boolean) {
+        rotate180 = enabled
+        Log.i(TAG, "180° rotation ${if (enabled) "enabled" else "disabled"}")
+    }
+
+    // Precalculated padding offset for rotation (calculated from integer pixel values)
+    private var paddingOffset: Float = 0f
+
+    /**
+     * Set decoder crop info from MediaCodec output format.
+     * Precalculates the padding offset to avoid floating point precision issues.
+     */
+    fun setDecoderCrop(bufferHeight: Int, cropTop: Int, cropBottom: Int) {
+        val topPadding = cropTop
+        val bottomPadding = bufferHeight - cropBottom - 1
+        // Precalculate offset from integer pixel values
+        // This is the amount to shift when rotating to avoid sampling from padding
+        paddingOffset = bottomPadding.toFloat() / bufferHeight.toFloat()
+        Log.i(TAG, "Decoder crop set: bufferHeight=$bufferHeight, cropTop=$cropTop, cropBottom=$cropBottom, topPadding=$topPadding, bottomPadding=$bottomPadding, paddingOffset=$paddingOffset")
+    }
+
+    /**
+     * Attach a SurfaceTexture for direct rendering. When frames arrive, renderFrame()
+     * is called immediately on the GL thread, ensuring 1:1 frame correspondence.
+     * This avoids frame duplication/dropping caused by async Flow processing.
+     */
+    fun attachSurfaceTexture(surfaceTexture: SurfaceTexture) {
+        surfaceTexture.setOnFrameAvailableListener({ st ->
+            // Called on GL thread - render immediately
+            renderFrame(st)
+        }, glHandler)
+        Log.i(TAG, "SurfaceTexture attached for direct rendering")
+    }
+
+    /**
+     * Detach the SurfaceTexture (removes the frame listener)
+     */
+    fun detachSurfaceTexture(surfaceTexture: SurfaceTexture) {
+        surfaceTexture.setOnFrameAvailableListener(null)
+        Log.i(TAG, "SurfaceTexture detached")
+    }
+
+    @Volatile
     private var overlayFrameAvailable = false
 
     /**
@@ -383,18 +524,14 @@ class SurfaceTextureRenderer {
 
         // Log transform matrix periodically for debugging
         if (System.currentTimeMillis() % 5000 < 50) {
-            Log.d(TAG, "Transform matrix: [${textureMatrix[0]}, ${textureMatrix[1]}, ${textureMatrix[2]}, ${textureMatrix[3]}]")
-            Log.d(TAG, "                  [${textureMatrix[4]}, ${textureMatrix[5]}, ${textureMatrix[6]}, ${textureMatrix[7]}]")
-            Log.d(TAG, "                  [${textureMatrix[8]}, ${textureMatrix[9]}, ${textureMatrix[10]}, ${textureMatrix[11]}]")
-            Log.d(TAG, "                  [${textureMatrix[12]}, ${textureMatrix[13]}, ${textureMatrix[14]}, ${textureMatrix[15]}]")
+            Log.i(TAG, "Transform matrix row0: [${textureMatrix[0]}, ${textureMatrix[1]}, ${textureMatrix[2]}, ${textureMatrix[3]}]")
+            Log.i(TAG, "Transform matrix row1: [${textureMatrix[4]}, ${textureMatrix[5]}, ${textureMatrix[6]}, ${textureMatrix[7]}]")
+            Log.i(TAG, "Transform matrix row2: [${textureMatrix[8]}, ${textureMatrix[9]}, ${textureMatrix[10]}, ${textureMatrix[11]}]")
+            Log.i(TAG, "Transform matrix row3: [${textureMatrix[12]}, ${textureMatrix[13]}, ${textureMatrix[14]}, ${textureMatrix[15]}]")
         }
 
-        // Override with identity matrix + 180 rotation + horizontal flip = vertical flip only
-        // The camera's transform matrix includes rotation that causes aspect ratio issues
-        Matrix.setIdentityM(textureMatrix, 0)
-        // 180 rotation + horizontal flip = vertical flip only
-        textureMatrix[5] = -1.0f   // Flip Y scale
-        textureMatrix[13] = 1.0f   // Translate Y to compensate
+        // 180° rotation and padding adjustment are handled in the fragment shader
+        // via uRotate180 and uPaddingOffset uniforms to avoid matrix precision issues.
 
         // Only update overlay texture if a new frame is available
         overlayTexture?.let { overlay ->
@@ -420,6 +557,9 @@ class SurfaceTextureRenderer {
         for ((_, eglSurface) in surfacesToRender) {
             renderToSurface(eglSurface)
         }
+
+        // Increment frame counter for next synthetic timestamp
+        frameCount++
     }
 
     /**
@@ -441,7 +581,6 @@ class SurfaceTextureRenderer {
         val height = IntArray(1)
         EGL14.eglQuerySurface(eglDisplay, eglSurface, EGL14.EGL_WIDTH, width, 0)
         EGL14.eglQuerySurface(eglDisplay, eglSurface, EGL14.EGL_HEIGHT, height, 0)
-        Log.d(TAG, "renderToSurface: surface dimensions ${width[0]}x${height[0]}")
 
         // Set viewport and clear
         GLES20.glViewport(0, 0, width[0], height[0])
@@ -460,6 +599,8 @@ class SurfaceTextureRenderer {
         // Set uniforms
         GLES20.glUniformMatrix4fv(textureMatrixHandle, 1, false, textureMatrix, 0)
         GLES20.glUniform1i(textureUniformHandle, 0)
+        GLES20.glUniform1i(rotate180UniformHandle, if (rotate180) 1 else 0)
+        GLES20.glUniform1f(paddingOffsetUniformHandle, paddingOffset)
 
         // Set overlay uniforms
         GLES20.glUniform1i(hasOverlayUniformHandle, if (hasOverlay) 1 else 0)
@@ -485,6 +626,11 @@ class SurfaceTextureRenderer {
         // Draw quad
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
 
+        // Set synthetic presentation time for smooth encoder timing
+        // This ensures constant frame intervals regardless of actual render timing
+        val presentationTimeNs = frameCount * frameIntervalNs
+        EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, presentationTimeNs)
+
         // Swap buffers
         EGL14.eglSwapBuffers(eglDisplay, eglSurface)
 
@@ -497,31 +643,40 @@ class SurfaceTextureRenderer {
      * Release all resources
      */
     fun release() {
-        synchronized(activeSurfaces) {
-            // Destroy all EGL surfaces
-            for ((_, eglSurface) in activeSurfaces) {
-                EGL14.eglDestroySurface(eglDisplay, eglSurface)
+        // Run cleanup on GL thread
+        val latch = CountDownLatch(1)
+        glHandler.post {
+            synchronized(activeSurfaces) {
+                // Destroy all EGL surfaces
+                for ((_, eglSurface) in activeSurfaces) {
+                    EGL14.eglDestroySurface(eglDisplay, eglSurface)
+                }
+                activeSurfaces.clear()
             }
-            activeSurfaces.clear()
-        }
 
-        // Delete shader program
-        if (program != 0) {
-            GLES20.glDeleteProgram(program)
-            program = 0
-        }
+            // Delete shader program
+            if (program != 0) {
+                GLES20.glDeleteProgram(program)
+                program = 0
+            }
 
-        // Destroy EGL context
-        if (eglContext != EGL14.EGL_NO_CONTEXT) {
-            EGL14.eglDestroyContext(eglDisplay, eglContext)
-            eglContext = EGL14.EGL_NO_CONTEXT
-        }
+            // Destroy EGL context
+            if (eglContext != EGL14.EGL_NO_CONTEXT) {
+                EGL14.eglDestroyContext(eglDisplay, eglContext)
+                eglContext = EGL14.EGL_NO_CONTEXT
+            }
 
-        // Terminate EGL
-        if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
-            EGL14.eglTerminate(eglDisplay)
-            eglDisplay = EGL14.EGL_NO_DISPLAY
+            // Terminate EGL
+            if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
+                EGL14.eglTerminate(eglDisplay)
+                eglDisplay = EGL14.EGL_NO_DISPLAY
+            }
+            latch.countDown()
         }
+        latch.await()
+
+        // Stop the GL thread
+        glThread.quitSafely()
 
         Log.i(TAG, "SurfaceTextureRenderer released")
     }

@@ -50,8 +50,10 @@ fun AudioSource(context: Context, deviceId: Int?): Flow<ByteArray> = callbackFlo
     }
 
     try {
+        // Use UNPROCESSED to avoid high-pass filtering and voice processing
+        // that causes "tinny" sound by removing bass frequencies.
         val audioRecord = AudioRecord(
-            MediaRecorder.AudioSource.MIC,
+            MediaRecorder.AudioSource.UNPROCESSED,
             sampleRate,
             channelConfig,
             audioFormat,

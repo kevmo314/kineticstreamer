@@ -43,6 +43,7 @@ import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.LinkedBlockingQueue
 
 data class Quadruple<out A, out B, out C, out D>(
     val first: A,
@@ -58,16 +59,16 @@ fun createVideoTexture(): Int {
     val texId = texIds[0]
     GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texId)
 
-    // Set up sane defaults for video playback
+    // Use NEAREST filtering to avoid bilinear artifacts at texture edges
     GLES20.glTexParameteri(
         GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
         GLES20.GL_TEXTURE_MIN_FILTER,
-        GLES20.GL_LINEAR
+        GLES20.GL_NEAREST
     )
     GLES20.glTexParameteri(
         GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
         GLES20.GL_TEXTURE_MAG_FILTER,
-        GLES20.GL_LINEAR
+        GLES20.GL_NEAREST
     )
     GLES20.glTexParameteri(
         GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
@@ -131,7 +132,7 @@ suspend fun openCamera(cameraManager: CameraManager, outputSurface: Surface, han
 }
 
 
-fun openUsbCamera(context: Context, device: UsbDevice, outputSurface: Surface): Quadruple<UsbDeviceConnection?, UVCStream?, Thread?, MediaCodec?> {
+fun openUsbCamera(context: Context, device: UsbDevice, outputSurface: Surface, renderer: SurfaceTextureRenderer? = null): Quadruple<UsbDeviceConnection?, UVCStream?, Thread?, MediaCodec?> {
     val manager = context.getSystemService(Context.USB_SERVICE) as UsbManager
     val conn = manager.openDevice(device)
     if (conn == null) {
@@ -146,7 +147,7 @@ fun openUsbCamera(context: Context, device: UsbDevice, outputSurface: Surface): 
         8, 1920, 1080, 30
     )
 
-    val (thread, decoder) = startUvcFrameProcessing(stream, outputSurface)
+    val (thread, decoder) = startUvcFrameProcessing(stream, outputSurface, renderer)
 
     return Quadruple(conn, stream, thread, decoder)
 }
@@ -154,7 +155,7 @@ fun openUsbCamera(context: Context, device: UsbDevice, outputSurface: Surface): 
 // Data class to hold frame data and its PTS
 data class FrameWithPTS(val data: ByteArray, val pts: Long, val eof: Boolean = false)
 
-fun startUvcFrameProcessing(stream: UVCStream, outputSurface: Surface): Pair<Thread, MediaCodec> {
+fun startUvcFrameProcessing(stream: UVCStream, outputSurface: Surface, renderer: SurfaceTextureRenderer? = null): Pair<Thread, MediaCodec> {
     val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, 1920, 1080)
     // Set additional format parameters for H264 from USB cameras
     format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
@@ -165,8 +166,10 @@ fun startUvcFrameProcessing(stream: UVCStream, outputSurface: Surface): Pair<Thr
 
     var sentOA4PPS = false
 
-    // Holds latest frame (replaces previous to avoid backup)
-    val latestFrame = AtomicReference<FrameWithPTS?>(null)
+    // Queue frames to avoid dropping P-frames (which causes decoding artifacts)
+    // H.264 P-frames reference previous frames, so we can't skip any
+    // Capacity of 30 = 1 second of buffer at 30fps
+    val frameQueue = LinkedBlockingQueue<FrameWithPTS>(30)
 
     val decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).apply {
         setCallback(object : MediaCodec.Callback() {
@@ -233,9 +236,10 @@ fun startUvcFrameProcessing(stream: UVCStream, outputSurface: Surface): Pair<Thr
                     return
                 }
 
-                val frameWithPTS = latestFrame.getAndSet(null)
+                // Poll for a frame (non-blocking to keep MediaCodec happy)
+                val frameWithPTS = frameQueue.poll()
                 if (frameWithPTS == null) {
-                    // No frame available yet, return the buffer empty to avoid blocking
+                    // No frame available yet, queue empty buffer to keep decoder cycling
                     codec.queueInputBuffer(index, 0, 0, 0, 0)
                     return
                 }
@@ -283,7 +287,21 @@ fun startUvcFrameProcessing(stream: UVCStream, outputSurface: Surface): Pair<Thr
                 codec: MediaCodec,
                 format: MediaFormat
             ) {
-                Log.e("VideoSource", "Decoder format changed to: $format")
+                Log.i("VideoSource", "Decoder output format: $format")
+                // Extract crop rect to determine padding
+                val width = format.getInteger(MediaFormat.KEY_WIDTH)
+                val height = format.getInteger(MediaFormat.KEY_HEIGHT)
+                val cropLeft = if (format.containsKey("crop-left")) format.getInteger("crop-left") else 0
+                val cropTop = if (format.containsKey("crop-top")) format.getInteger("crop-top") else 0
+                val cropRight = if (format.containsKey("crop-right")) format.getInteger("crop-right") else width - 1
+                val cropBottom = if (format.containsKey("crop-bottom")) format.getInteger("crop-bottom") else height - 1
+                val cropWidth = cropRight - cropLeft + 1
+                val cropHeight = cropBottom - cropTop + 1
+                Log.i("VideoSource", "Decoder buffer: ${width}x${height}, crop: ($cropLeft,$cropTop)-($cropRight,$cropBottom), content: ${cropWidth}x${cropHeight}")
+                Log.i("VideoSource", "Padding - top: $cropTop, bottom: ${height - cropBottom - 1}, left: $cropLeft, right: ${width - cropRight - 1}")
+
+                // Pass crop info to renderer for padding adjustment when rotating
+                renderer?.setDecoderCrop(height, cropTop, cropBottom)
             }
 
         })
@@ -296,13 +314,13 @@ fun startUvcFrameProcessing(stream: UVCStream, outputSurface: Surface): Pair<Thr
             val frameData = stream.readFrame()
             if (frameData == null) {
                 // Signal EOF and exit
-                latestFrame.set(FrameWithPTS(ByteArray(0), 0, true))
+                frameQueue.put(FrameWithPTS(ByteArray(0), 0, true))
                 break
             }
             // Get the PTS for this frame from the UVC stream
             val pts = stream.getPTS()
-            // Store latest frame (overwrites previous)
-            latestFrame.set(FrameWithPTS(frameData, pts, false))
+            // Queue frame (blocks if queue is full, applying backpressure to USB)
+            frameQueue.put(FrameWithPTS(frameData, pts, false))
         }
     }
 
@@ -366,13 +384,17 @@ private fun validateH264Frame(data: ByteArray): Pair<Boolean, String> {
 /**
  * VideoSource represents a persistent video source that manages the
  * camera device (or USB camera) and its associated resources.
+ *
+ * If a renderer is provided, frames are rendered directly on the GL thread
+ * for perfect frame synchronization (no duplication/dropping).
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 @androidx.annotation.RequiresPermission(
     android.Manifest.permission.CAMERA
 )
-fun VideoSource(      context: Context,
-                        device: VideoSourceDevice): Flow<SurfaceTexture> = callbackFlow {
+fun VideoSource(context: Context,
+                device: VideoSourceDevice,
+                renderer: SurfaceTextureRenderer? = null): Flow<SurfaceTexture> = callbackFlow {
     var cameraDevice: CameraDevice? = null
     var captureSession: CameraCaptureSession? = null
 
@@ -381,9 +403,11 @@ fun VideoSource(      context: Context,
     var activeDecoder: MediaCodec? = null
     var activeUvcThread: Thread? = null
     val outputSurfaceTexture = SurfaceTexture(createVideoTexture()).apply {
-        // Set default buffer size to match expected video resolution
-        setDefaultBufferSize(1920, 1080)
-        Log.i("VideoSource", "Created SurfaceTexture with default buffer size 1920x1080")
+        // Set buffer size to 1088 (macroblock-aligned) to match H.264 decoder output.
+        // This avoids scaling in the transform matrix - the 1080p encoder surface
+        // will naturally crop the bottom 8 padding pixels during rendering.
+        setDefaultBufferSize(1920, 1088)
+        Log.i("VideoSource", "Created SurfaceTexture with buffer size 1920x1088 (macroblock aligned)")
     }
     val outputSurface = Surface(outputSurfaceTexture)
 
@@ -400,7 +424,7 @@ fun VideoSource(      context: Context,
     when (device) {
         is VideoSourceDevice.UsbCamera -> {
             Log.i("VideoSource", "Opening USB camera: ${device.usbDevice.productName}")
-            val (conn, uvcStream, thread, decoder) = openUsbCamera(context, device.usbDevice, outputSurface)
+            val (conn, uvcStream, thread, decoder) = openUsbCamera(context, device.usbDevice, outputSurface, renderer)
             activeUsbDeviceConnection = conn
             activeUvcStream = uvcStream
             activeUvcThread = thread
@@ -421,12 +445,27 @@ fun VideoSource(      context: Context,
     }
 
     var frameCount = 0
-    outputSurfaceTexture.setOnFrameAvailableListener {
-        frameCount++
-        if (frameCount == 1 || frameCount % 100 == 0) {
-            Log.i("VideoSource", "Frame $frameCount received, timestamp: ${it.timestamp}")
+    if (renderer != null) {
+        // Direct rendering mode: render immediately on GL thread
+        // This ensures 1:1 frame correspondence (no duplication/dropping)
+        outputSurfaceTexture.setOnFrameAvailableListener({ st ->
+            frameCount++
+            if (frameCount == 1 || frameCount % 100 == 0) {
+                Log.i("VideoSource", "Frame $frameCount received (direct), timestamp: ${st.timestamp}")
+            }
+            renderer.renderFrame(st)
+        }, renderer.glHandler)
+        // Send once to signal the flow is active (for lifecycle management)
+        trySend(outputSurfaceTexture)
+    } else {
+        // Flow mode: send frames through the channel (may drop/duplicate)
+        outputSurfaceTexture.setOnFrameAvailableListener {
+            frameCount++
+            if (frameCount == 1 || frameCount % 100 == 0) {
+                Log.i("VideoSource", "Frame $frameCount received (flow), timestamp: ${it.timestamp}")
+            }
+            trySend(it)
         }
-        trySend(it)
     }
 
     awaitClose {

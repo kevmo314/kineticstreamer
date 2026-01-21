@@ -149,12 +149,15 @@ func GoCreateUVCSource(fd int32) (handle int64) {
 	}()
 	
 	log.Printf("GoCreateUVCSource called with fd=%d", fd)
+	println("GoCreateUVCSource called with fd=", fd)
 	source, err := kinetic.NewUVCSource(int(fd))
 	if err != nil {
 		log.Printf("Failed to create UVC source: %v", err)
+		println("Failed to create UVC source:", err.Error())
 		return 0
 	}
 	log.Printf("Successfully created UVC source")
+	println("Successfully created UVC source")
 	
 	mu.Lock()
 	handle = nextHandle
@@ -182,11 +185,14 @@ func GoUVCSourceStartStreaming(handle int64, format, width, height, fps int32) (
 		return 0
 	}
 	
+	println("GoUVCSourceStartStreaming called with handle=", handle)
 	stream, err := source.StartStreaming(int(format), int(width), int(height), int(fps))
 	if err != nil {
 	    log.Printf("got error: %s", err)
+	    println("StartStreaming got error:", err.Error())
 		return 0
 	}
+	println("StartStreaming succeeded")
 	
 	mu.Lock()
 	streamHandle = nextHandle
@@ -258,14 +264,19 @@ func GoCreateWHIPSink(urlStr, tokenStr, mimeTypesStr *C.char) (handle int64) {
 			handle = 0
 		}
 	}()
-	
+
 	url := C.GoString(urlStr)
 	token := C.GoString(tokenStr)
 	mimeTypes := C.GoString(mimeTypesStr)
 
-	log.Printf("WHIP: creating sink url=%s mimeTypes=%s", url, mimeTypes)
+	log.Printf("WHIP: creating sink url=%s mimeTypes=%s useScream=%v", url, mimeTypes, kinetic.UseScream)
 
-	sink, err := kinetic.NewWHIPSink(url, token, mimeTypes)
+	var opts []kinetic.WHIPSinkOption
+	if kinetic.UseScream {
+		opts = append(opts, kinetic.WithScream())
+	}
+
+	sink, err := kinetic.NewWHIPSink(url, token, mimeTypes, opts...)
 	if err != nil {
 		log.Printf("WHIP: failed to create sink: %v", err)
 		return 0

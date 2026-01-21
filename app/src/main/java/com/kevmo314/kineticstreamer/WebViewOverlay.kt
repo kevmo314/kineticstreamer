@@ -183,15 +183,19 @@ class WebViewOverlay(private val context: Context) {
                 // Load URL after view is attached
                 webView?.loadUrl(url)
 
-                // Initialize surface capture with context
+                // Create overlay texture on GL thread via renderer (must have valid GL context)
+                val overlaySurfaceTexture = renderer?.createOverlayTexture(overlayWidth, overlayHeight)
+                Log.i(TAG, "Created overlay texture via renderer: $overlaySurfaceTexture")
+
+                // Initialize surface capture with the renderer-created SurfaceTexture
                 surfaceCapture = WebViewSurfaceCapture()
-                surfaceCapture?.initialize(overlayWidth, overlayHeight, context)
-                Log.i(TAG, "Surface capture initialized, textureId=${surfaceCapture?.getTextureId()}")
+                surfaceCapture?.initialize(overlayWidth, overlayHeight, context, overlaySurfaceTexture)
+                Log.i(TAG, "Surface capture initialized with external SurfaceTexture")
 
                 Log.i(TAG, "Initialized with SurfaceControl for hardware acceleration")
 
-                // Ensure the SurfaceTexture is available and update the renderer
-                updateRendererOverlay()
+                // Set overlay bounds on renderer
+                renderer?.setOverlayBounds(overlayX, overlayY, overlayWidth, overlayHeight, 1920, 1080)
 
             return true
         } catch (e: Exception) {
@@ -266,6 +270,9 @@ class WebViewOverlay(private val context: Context) {
             }
         }
 
+        // Update renderer bounds if position or size changed
+        renderer?.setOverlayBounds(overlayX, overlayY, overlayWidth, overlayHeight, 1920, 1080)
+
         Log.i(TAG, "WebViewOverlay updated - Position: ($overlayX, $overlayY), Size: ${overlayWidth}x${overlayHeight}")
     }
 
@@ -327,6 +334,16 @@ class WebViewOverlay(private val context: Context) {
      */
     fun refreshRender() {
         webView?.postInvalidateOnAnimation()
+    }
+
+    /**
+     * Reload the WebView content
+     */
+    fun reload() {
+        mainHandler.post {
+            webView?.reload()
+            Log.i(TAG, "WebView reload triggered")
+        }
     }
 
     /**
