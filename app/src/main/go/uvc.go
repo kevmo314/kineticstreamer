@@ -65,7 +65,10 @@ type UVCStream struct {
 	frameIntervalNanos  int64   // Frame interval in nanoseconds from negotiated format
 	fps                 float64 // Calculated frames per second
 	frameCount          int64   // Count of actual frames (not SPS/PPS)
-	lastPTSMicros       int64   // PTS of the last frame returned
+	lastPTS             uint32  // Raw PTS from UVC payload header (device clock ticks)
+	lastSOF             uint16  // USB SOF counter from UVC payload header (1kHz)
+	hasPTS              bool    // Whether the last frame had a valid PTS
+	lastArrivalTimeNs   int64   // CLOCK_MONOTONIC timestamp when frame arrived from USB
 }
 
 // StartStreaming starts video streaming with the specified format
@@ -116,7 +119,10 @@ func (s *UVCSource) StartStreaming(format, width, height, fps int) (*UVCStream, 
                    frameIntervalNanos: frameIntervalNanos,
                    fps:                actualFps,
                    frameCount:         0,
-                   lastPTSMicros:      0,
+                   lastPTS:            0,
+                   lastSOF:            0,
+                   hasPTS:             false,
+                   lastArrivalTimeNs:  0,
                }, nil
             }
         }
@@ -185,22 +191,51 @@ func (s *UVCStream) ReadFrame() ([]byte, error) {
         copy(buf[offset:], p.Data)
         offset += len(p.Data)
     }
-    
+
+    // Capture arrival time from frame (CLOCK_MONOTONIC, set when first USB payload arrived)
+    s.lastArrivalTimeNs = frame.ArrivalTimeNs
+
+    // Get hardware PTS and SOF from the UVC payload header (if device provides them)
+    pts, hasPTS := frame.PTS()
+    _, sof, hasSCR := frame.SCR()
+    if hasPTS {
+        s.lastPTS = pts
+        s.hasPTS = true
+    }
+    if hasSCR {
+        s.lastSOF = sof
+    }
+
     // Check if this is an actual frame or SPS/PPS
     if isH264Frame(buf) {
-        // It's a frame, increment counter and calculate new PTS
         s.frameCount++
-        s.lastPTSMicros = s.frameCount * 100_000 / 3
     }
-    // For SPS/PPS, keep the same PTS as the next frame will have
-    // (lastPTSMicros stays the same)
-    
+
     return buf, nil
 }
 
-// GetPTS returns the PTS of the last frame returned in microseconds
+// GetPTS returns the PTS of the last frame in device clock units.
+// Note: This is the raw hardware PTS from the UVC payload header.
 func (s *UVCStream) GetPTS() int64 {
-    return s.lastPTSMicros
+    return int64(s.lastPTS)
+}
+
+// GetSOF returns the USB Start-of-Frame counter (1kHz) from the last frame.
+// This is the common clock reference between UVC and UAC devices on the same USB bus.
+func (s *UVCStream) GetSOF() int64 {
+    return int64(s.lastSOF)
+}
+
+// HasPTS returns whether the last frame had a valid PTS from the device.
+func (s *UVCStream) HasPTS() bool {
+    return s.hasPTS
+}
+
+// GetArrivalTimeNs returns the CLOCK_MONOTONIC timestamp (in nanoseconds) when
+// the first USB payload of this frame arrived. This is the same clock used by
+// AudioRecord.getTimestamp(TIMEBASE_MONOTONIC) for A/V synchronization.
+func (s *UVCStream) GetArrivalTimeNs() int64 {
+    return s.lastArrivalTimeNs
 }
 
 // Close stops the stream

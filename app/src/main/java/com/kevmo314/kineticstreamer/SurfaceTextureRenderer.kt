@@ -149,9 +149,9 @@ class SurfaceTextureRenderer {
     @Volatile
     private var rotate180 = false
 
-    // Synthetic timestamp support for smooth encoder timing
-    private var frameCount = 0L
-    private val frameIntervalNs = 33_333_333L // 30fps = ~33.33ms per frame
+    // Stream start time for wall-clock timestamp synchronization with audio
+    @Volatile
+    var streamStartTimeNanos: Long = 0
 
     @Volatile
     private var isInitialized = false
@@ -553,13 +553,15 @@ class SurfaceTextureRenderer {
             activeSurfaces.toList()
         }
 
+        // Use SurfaceTexture's timestamp which comes from the decoder input
+        // We pass CLOCK_MONOTONIC microseconds to decoder, SurfaceTexture returns nanoseconds
+        // Don't normalize to zero - audio and video must use same CLOCK_MONOTONIC time base
+        val presentationTimeNanos = surfaceTexture.timestamp
+
         // Render to each active surface without holding lock
         for ((_, eglSurface) in surfacesToRender) {
-            renderToSurface(eglSurface)
+            renderToSurface(eglSurface, presentationTimeNanos)
         }
-
-        // Increment frame counter for next synthetic timestamp
-        frameCount++
     }
 
     /**
@@ -569,7 +571,7 @@ class SurfaceTextureRenderer {
         overlayFrameAvailable = true
     }
 
-    private fun renderToSurface(eglSurface: EGLSurface) {
+    private fun renderToSurface(eglSurface: EGLSurface, presentationTimeNanos: Long) {
         // Make this surface current
         if (!EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)) {
             Log.e(TAG, "Failed to make EGL surface current")
@@ -626,10 +628,9 @@ class SurfaceTextureRenderer {
         // Draw quad
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
 
-        // Set synthetic presentation time for smooth encoder timing
-        // This ensures constant frame intervals regardless of actual render timing
-        val presentationTimeNs = frameCount * frameIntervalNs
-        EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, presentationTimeNs)
+        // Set presentation time for encoder using wall-clock timestamp
+        // This ensures A/V sync by using the same time base as audio
+        EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, presentationTimeNanos)
 
         // Swap buffers
         EGL14.eglSwapBuffers(eglDisplay, eglSurface)

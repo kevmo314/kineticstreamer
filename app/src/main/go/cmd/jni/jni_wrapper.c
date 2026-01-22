@@ -173,6 +173,11 @@ Java_com_kevmo314_kineticstreamer_kinetic_UVCStream_getPTS(JNIEnv* env, jobject 
     return GoUVCStreamGetPTS(handle);
 }
 
+JNIEXPORT jlong JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_UVCStream_getArrivalTimeNs(JNIEnv* env, jobject obj, jlong handle) {
+    return GoUVCStreamGetArrivalTimeNs(handle);
+}
+
 JNIEXPORT void JNICALL
 Java_com_kevmo314_kineticstreamer_kinetic_UVCStream_close(JNIEnv* env, jobject obj, jlong handle) {
     GoUVCStreamClose(handle);

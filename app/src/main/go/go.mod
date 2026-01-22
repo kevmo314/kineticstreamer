@@ -39,3 +39,5 @@ require (
 replace github.com/bluenviron/mediacommon v1.14.0 => github.com/kevmo314/mediacommon v0.0.0-20240430015613-61465b2e6a80
 
 replace github.com/mengelbart/scream-go => ./third_party/scream-go
+
+replace github.com/kevmo314/go-uvc => ./third_party/go-uvc

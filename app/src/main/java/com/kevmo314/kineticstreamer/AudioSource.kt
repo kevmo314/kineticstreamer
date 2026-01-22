@@ -6,6 +6,7 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.AudioTimestamp
 import android.util.Log
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.channels.awaitClose
@@ -14,15 +15,20 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlin.concurrent.thread
 
 /**
- * Creates a Flow of audio data from the specified audio device.
+ * Audio data with capture timestamp for A/V synchronization.
+ */
+data class TimestampedAudio(val data: ByteArray, val captureTimeNanos: Long)
+
+/**
+ * Creates a Flow of timestamped audio data from the specified audio device.
  *
  * @param context Android context
  * @param deviceId The audio device ID from AudioDeviceInfo, or null for default microphone
- * @return Flow of PCM audio data as ByteArrays
+ * @return Flow of PCM audio data with capture timestamps
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 @androidx.annotation.RequiresPermission(android.Manifest.permission.RECORD_AUDIO)
-fun AudioSource(context: Context, deviceId: Int?): Flow<ByteArray> = callbackFlow  {
+fun AudioSource(context: Context, deviceId: Int?): Flow<TimestampedAudio> = callbackFlow  {
     val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
     // Find the audio device if an ID was provided
@@ -81,6 +87,9 @@ fun AudioSource(context: Context, deviceId: Int?): Flow<ByteArray> = callbackFlo
                 val buffer = ByteArray(bufferSize)
                 var frameCount = 0
                 var totalBytes = 0
+                var totalSamplesRead = 0L
+                val audioTimestamp = AudioTimestamp()
+                var startRecordingTimeNanos = System.nanoTime() // Fallback
 
                 while (!Thread.currentThread().isInterrupted) {
                     val bytesRead = audioRecord.read(buffer, 0, buffer.size)
@@ -88,11 +97,21 @@ fun AudioSource(context: Context, deviceId: Int?): Flow<ByteArray> = callbackFlo
                     if (bytesRead > 0) {
                         frameCount++
                         totalBytes += bytesRead
+                        val samplesInThisRead = bytesRead / 2 // 16-bit PCM = 2 bytes per sample
 
-                        // Log periodically for debugging
-                        if (frameCount % 100 == 0) {
-                            Log.d("AudioSource", "Audio recording: frame $frameCount, total bytes: $totalBytes, device: $deviceName")
+                        // Calculate timestamp using AudioRecord.getTimestamp() for hardware-accurate timing
+                        val status = audioRecord.getTimestamp(audioTimestamp, AudioTimestamp.TIMEBASE_MONOTONIC)
+                        val captureTimeNanos = if (status == AudioRecord.SUCCESS) {
+                            // Calculate timestamp for the START of this buffer
+                            // audioTimestamp gives us an anchor: framePosition <-> nanoTime
+                            val frameDiff = totalSamplesRead - audioTimestamp.framePosition
+                            audioTimestamp.nanoTime + (frameDiff * 1_000_000_000L / sampleRate)
+                        } else {
+                            // Fallback: calculate based on samples read
+                            startRecordingTimeNanos + (totalSamplesRead * 1_000_000_000L / sampleRate)
                         }
+
+                        totalSamplesRead += samplesInThisRead
 
                         // Log first frame for debugging
                         if (frameCount == 1) {
@@ -103,8 +122,8 @@ fun AudioSource(context: Context, deviceId: Int?): Flow<ByteArray> = callbackFlo
                         // Create a copy of the exact size read
                         val audioData = buffer.copyOfRange(0, bytesRead)
 
-                        // Send audio data to flow
-                        trySend(audioData)
+                        // Send timestamped audio data to flow
+                        trySend(TimestampedAudio(audioData, captureTimeNanos))
                     } else if (bytesRead < 0) {
                         Log.e("AudioSource", "AudioRecord read error: $bytesRead")
                         break

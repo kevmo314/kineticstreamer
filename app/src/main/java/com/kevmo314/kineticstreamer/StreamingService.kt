@@ -58,6 +58,8 @@ import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicReference
@@ -201,6 +203,7 @@ class StreamingService : Service() {
             audioEncoderSampleCount = 0
             audioBufferQueue.clear()
             audioBufferRemainder = ByteArray(0)
+            audioBufferTimestampNanos = 0
             lastVideoTimestampNanos = 0
             videoFrameCount = 0
             lastBitrate = 0
@@ -209,7 +212,10 @@ class StreamingService : Service() {
             // Setup and start encoders (they'll use the initialized timestamps)
             setupEncoders()
             Log.i("StreamingService", "Encoders initialized and started")
-            
+
+            // Pass stream start time to renderer for wall-clock timestamp sync
+            renderer?.streamStartTimeNanos = streamStartTimeNanos
+
             // Initialize renderer and launch flows
             renderer?.addOutputSurface(videoEncoderInputSurface)
             Log.i("StreamingService", "Flows launched and streaming active")
@@ -221,6 +227,7 @@ class StreamingService : Service() {
 
             // Reset timestamp tracking
             streamStartTimeNanos = 0
+            renderer?.streamStartTimeNanos = 0
             audioSampleCount = 0
             lastVideoTimestampNanos = 0
             
@@ -393,9 +400,9 @@ class StreamingService : Service() {
 
         // Create audio format based on selected codec
         val audioMediaFormat = if (useOpusAudio) {
-            // Opus for WHIP/WebRTC - mono, 48kHz
-            MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, 48000, 1).apply {
-                setInteger(MediaFormat.KEY_BIT_RATE, 64000)
+            // Opus for WHIP/WebRTC - stereo, 48kHz (mono input duplicated to stereo)
+            MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, 48000, 2).apply {
+                setInteger(MediaFormat.KEY_BIT_RATE, 128000) // Double bitrate for stereo
 
                 // Low-latency Opus settings
                 try {
@@ -408,11 +415,11 @@ class StreamingService : Service() {
                     Log.w("StreamingService", "Opus latency optimizations not supported: ${e.message}")
                 }
 
-                Log.i("StreamingService", "Opus encoder configured for ultra-low latency: VoIP mode, no FEC")
+                Log.i("StreamingService", "Opus encoder configured: stereo 128kbps, ultra-low latency, VoIP mode")
             }
         } else {
-            // AAC for SRT/MPEG-TS - mono, 48kHz, AAC-LC profile (mono to match audio source)
-            MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, 48000, 1).apply {
+            // AAC for SRT/MPEG-TS - stereo, 48kHz, AAC-LC profile (mono input duplicated to stereo)
+            MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, 48000, 2).apply {
                 setInteger(MediaFormat.KEY_BIT_RATE, 192000)
                 setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
 
@@ -422,7 +429,7 @@ class StreamingService : Service() {
                     Log.w("StreamingService", "AAC priority setting not supported: ${e.message}")
                 }
 
-                Log.i("StreamingService", "AAC encoder configured: 192kbps, AAC-LC, mono")
+                Log.i("StreamingService", "AAC encoder configured: 192kbps, AAC-LC, stereo")
             }
         }
 
@@ -528,10 +535,9 @@ class StreamingService : Service() {
                     val array = ByteArray(info.size)
                     buffer.get(array, info.offset, info.size)
 
-                    if (initialTimestamp == 0L) {
-                        initialTimestamp = info.presentationTimeUs
-                    }
-                    val ts = info.presentationTimeUs - initialTimestamp
+                    // Normalize to stream start time - both audio and video use the same reference
+                    // so they remain in sync while starting near zero for MPEG-TS compatibility
+                    val ts = info.presentationTimeUs - (streamStartTimeNanos / 1000)
 
                     // Queue network writes on dedicated thread to avoid blocking encoder
                     val flags = info.flags
@@ -554,8 +560,8 @@ class StreamingService : Service() {
                             }
 
                             if (targetBitrate > 0) {
-                                // Subtract audio bitrate from total estimate (Opus=64Kbps, AAC=192Kbps)
-                                val audioBitrate = if (useOpusAudio) 64000 else 192000
+                                // Subtract audio bitrate from total estimate (Opus stereo=128Kbps, AAC stereo=192Kbps)
+                                val audioBitrate = if (useOpusAudio) 128000 else 192000
                                 val encoderBitrate = maxOf(targetBitrate - audioBitrate, 100000)
                                 val diff = kotlin.math.abs(encoderBitrate - lastBitrate)
                                 if (diff > lastBitrate * 0.05) {
@@ -615,11 +621,11 @@ class StreamingService : Service() {
         if (ActivityCompat.checkSelfPermission(applicationContext, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             return
         }
-        // Set audio format parameters directly (no need for dummy AudioRecord)
-        // These match the parameters used in AudioSource.kt
-        audioMediaFormat.setInteger(MediaFormat.KEY_CHANNEL_COUNT, 1) // Mono
+        // Set audio format parameters directly
+        // Input is mono from AudioSource, converted to stereo before encoding
+        audioMediaFormat.setInteger(MediaFormat.KEY_CHANNEL_COUNT, 2) // Stereo (after conversion)
         audioMediaFormat.setInteger(MediaFormat.KEY_SAMPLE_RATE, 48000) // 48kHz
-        audioMediaFormat.setInteger(MediaFormat.KEY_CHANNEL_MASK, AudioFormat.CHANNEL_IN_MONO)
+        audioMediaFormat.setInteger(MediaFormat.KEY_CHANNEL_MASK, AudioFormat.CHANNEL_OUT_STEREO)
         audioMediaFormat.setInteger(MediaFormat.KEY_PCM_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
 
         audioEncoder = MediaCodec.createByCodecName(
@@ -639,11 +645,16 @@ class StreamingService : Service() {
 
                         // Build up data to fill the encoder buffer
                         var accumulated = audioBufferRemainder
+                        var timestampNanos = audioBufferTimestampNanos
 
                         // Pull from queue until we have enough data
                         while (accumulated.size < bufferCapacity) {
                             val chunk = audioBufferQueue.poll() ?: break
-                            accumulated = accumulated + chunk
+                            // Use timestamp of first chunk in this buffer
+                            if (accumulated.isEmpty() && audioBufferRemainder.isEmpty()) {
+                                timestampNanos = chunk.second
+                            }
+                            accumulated = accumulated + chunk.first
                         }
 
                         if (accumulated.isEmpty()) {
@@ -662,6 +673,8 @@ class StreamingService : Service() {
                         } else {
                             ByteArray(0)
                         }
+                        // Track timestamp for remainder data
+                        audioBufferTimestampNanos = timestampNanos
 
                         // Debug: log input PCM size periodically
                         audioInputCount++
@@ -669,16 +682,9 @@ class StreamingService : Service() {
                             Log.i("StreamingService", "Audio INPUT: frame=$audioInputCount, accumulated=${accumulated.size}, sent=$dataSize, remainder=${audioBufferRemainder.size}, queueSize=${audioBufferQueue.size}")
                         }
 
-                        // Calculate timestamp for this audio buffer
-                        val sampleRate = 48000
-                        val samplesInBuffer = dataSize / 2 // 16-bit PCM
-                        val timestampUs = if (streamStartTimeNanos > 0) {
-                            val elapsedNanos = (audioEncoderSampleCount * 1_000_000_000L) / sampleRate
-                            elapsedNanos / 1000 // Relative time from start
-                        } else {
-                            0L
-                        }
-                        audioEncoderSampleCount += samplesInBuffer
+                        // Convert capture timestamp from nanos to micros for MediaCodec
+                        // Using raw CLOCK_MONOTONIC time (same base as video UVC PTS)
+                        val timestampUs = timestampNanos / 1000
 
                         codec.queueInputBuffer(index, 0, dataSize, timestampUs, 0)
                     } catch (e: IllegalStateException) {
@@ -702,8 +708,8 @@ class StreamingService : Service() {
                             Log.i("StreamingService", "Audio OUTPUT: frame=$audioOutputCount, aacSize=${array.size}, pts=${info.presentationTimeUs}")
                         }
 
-                        // Queue network writes on dedicated thread to avoid blocking encoder
-                        val pts = info.presentationTimeUs
+                        // Normalize to stream start time - same reference as video for A/V sync
+                        val pts = info.presentationTimeUs - (streamStartTimeNanos / 1000)
                         val flags = info.flags
                         networkExecutor?.execute {
                             try {
@@ -799,19 +805,41 @@ class StreamingService : Service() {
     
     
     // Audio buffer queue to properly handle size mismatches between AudioSource and encoder
-    private val audioBufferQueue = java.util.concurrent.LinkedBlockingQueue<ByteArray>(100)
+    // Stores pairs of (stereo PCM data, capture timestamp in nanos)
+    private val audioBufferQueue = java.util.concurrent.LinkedBlockingQueue<Pair<ByteArray, Long>>(100)
     private var audioBufferRemainder = ByteArray(0) // Leftover bytes from previous chunk
+    private var audioBufferTimestampNanos: Long = 0 // Timestamp for current accumulated buffer
 
-    private fun feedAudioDataToEncoder(audioData: ByteArray) {
-        // Update sample count for next frame
+    private fun feedAudioDataToEncoder(audioData: ByteArray, captureTimeNanos: Long) {
+        // Update sample count for next frame (mono samples)
         val samplesInBuffer = audioData.size / 2 // 16-bit PCM = 2 bytes per sample
         audioSampleCount += samplesInBuffer
 
-        // Calculate audio levels for visualizer
+        // Calculate audio levels for visualizer (use original mono data)
         calculateAndSendAudioLevels(audioData)
 
-        // Add to queue for encoder (non-blocking, drop if queue is full)
-        audioBufferQueue.offer(audioData)
+        // Convert mono to stereo for encoder (fixes left-channel-only playback)
+        val stereoData = convertMonoToStereo(audioData)
+
+        // Add to queue for encoder with raw capture timestamp (non-blocking, drop if queue is full)
+        // Don't normalize - audio and video must use same CLOCK_MONOTONIC time base
+        audioBufferQueue.offer(Pair(stereoData, captureTimeNanos))
+    }
+
+    /**
+     * Converts mono PCM audio to stereo by duplicating each sample.
+     * This fixes the issue where mono AAC in MPEG-TS plays only in the left channel.
+     */
+    private fun convertMonoToStereo(monoData: ByteArray): ByteArray {
+        val mono = ByteBuffer.wrap(monoData).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+        val stereo = ByteBuffer.allocate(monoData.size * 2).order(ByteOrder.LITTLE_ENDIAN)
+        val stereoShort = stereo.asShortBuffer()
+        while (mono.hasRemaining()) {
+            val sample = mono.get()
+            stereoShort.put(sample)  // left
+            stereoShort.put(sample)  // right (duplicate)
+        }
+        return stereo.array()
     }
 
     private fun calculateAndSendAudioLevels(audioData: ByteArray) {
@@ -1026,14 +1054,14 @@ class StreamingService : Service() {
                 Log.i("StreamingService", "Using selected audio device ID: $deviceId")
                 AudioSource(this, deviceId)
             }
-            .buffer(Channel.CONFLATED) // Only keep latest audio to minimize latency
-            .onEach { audioData ->
+            .buffer(10) // Small bounded buffer to avoid dropping audio samples
+            .onEach { timestampedAudio ->
                 // Only feed to encoder if streaming
                 if (audioEncoder != null) {
-                    feedAudioDataToEncoder(audioData)
+                    feedAudioDataToEncoder(timestampedAudio.data, timestampedAudio.captureTimeNanos)
                 } else {
                     // Still calculate audio levels for visualizer even when not streaming
-                    calculateAndSendAudioLevels(audioData)
+                    calculateAndSendAudioLevels(timestampedAudio.data)
                 }
             }
             .launchIn(audioScope)

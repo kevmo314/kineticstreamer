@@ -140,6 +140,17 @@ fun openUsbCamera(context: Context, device: UsbDevice, outputSurface: Surface, r
         return Quadruple(null, null, null, null)
     }
 
+    // Claim video interfaces with force=true to detach kernel uvcvideo driver
+    // This leaves audio interfaces (2, 3, 4) for snd-usb-audio
+    for (i in 0 until device.interfaceCount) {
+        val iface = device.getInterface(i)
+        // Only claim UVC video interfaces (class 14 = Video)
+        if (iface.interfaceClass == 14) {
+            val claimed = conn.claimInterface(iface, true)
+            Log.i("VideoSource", "Claimed interface ${iface.id} (${iface.name}): $claimed")
+        }
+    }
+
     // Initialize UVC source
     val uvcSource = UVCSource(conn.fileDescriptor)
 
@@ -317,8 +328,10 @@ fun startUvcFrameProcessing(stream: UVCStream, outputSurface: Surface, renderer:
                 frameQueue.put(FrameWithPTS(ByteArray(0), 0, true))
                 break
             }
-            // Get the PTS for this frame from the UVC stream
-            val pts = stream.getPTS()
+            // Get arrival time in CLOCK_MONOTONIC nanoseconds, convert to microseconds for MediaCodec
+            // This is the same clock as AudioRecord.getTimestamp(TIMEBASE_MONOTONIC)
+            val arrivalTimeNs = stream.getArrivalTimeNs()
+            val pts = arrivalTimeNs / 1000  // Convert nanos to micros
             // Queue frame (blocks if queue is full, applying backpressure to USB)
             frameQueue.put(FrameWithPTS(frameData, pts, false))
         }
@@ -444,15 +457,10 @@ fun VideoSource(context: Context,
         }
     }
 
-    var frameCount = 0
     if (renderer != null) {
         // Direct rendering mode: render immediately on GL thread
         // This ensures 1:1 frame correspondence (no duplication/dropping)
         outputSurfaceTexture.setOnFrameAvailableListener({ st ->
-            frameCount++
-            if (frameCount == 1 || frameCount % 100 == 0) {
-                Log.i("VideoSource", "Frame $frameCount received (direct), timestamp: ${st.timestamp}")
-            }
             renderer.renderFrame(st)
         }, renderer.glHandler)
         // Send once to signal the flow is active (for lifecycle management)
@@ -460,10 +468,6 @@ fun VideoSource(context: Context,
     } else {
         // Flow mode: send frames through the channel (may drop/duplicate)
         outputSurfaceTexture.setOnFrameAvailableListener {
-            frameCount++
-            if (frameCount == 1 || frameCount % 100 == 0) {
-                Log.i("VideoSource", "Frame $frameCount received (flow), timestamp: ${it.timestamp}")
-            }
             trySend(it)
         }
     }

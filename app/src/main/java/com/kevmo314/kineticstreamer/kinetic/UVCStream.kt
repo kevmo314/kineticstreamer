@@ -30,8 +30,19 @@ class UVCStream(private var handle: Long) : Closeable {
         return getPTS(handle)
     }
 
+    /**
+     * Get the arrival time of the last frame in CLOCK_MONOTONIC nanoseconds.
+     * This is the same clock used by AudioRecord.getTimestamp(TIMEBASE_MONOTONIC)
+     * for A/V synchronization.
+     */
+    fun getArrivalTimeNs(): Long {
+        if (handle == 0L) return 0L
+        return getArrivalTimeNs(handle)
+    }
+
     private external fun readFrame(handle: Long): ByteArray?
     private external fun getPTS(handle: Long): Long
+    private external fun getArrivalTimeNs(handle: Long): Long
 
     override fun close() {
         if (handle != 0L) {

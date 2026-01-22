@@ -237,12 +237,25 @@ func GoUVCStreamGetPTS(handle int64) int64 {
 	mu.RLock()
 	stream, ok := uvcStreams[handle]
 	mu.RUnlock()
-	
+
 	if !ok {
 		return 0
 	}
-	
+
 	return stream.GetPTS()
+}
+
+//export GoUVCStreamGetArrivalTimeNs
+func GoUVCStreamGetArrivalTimeNs(handle int64) int64 {
+	mu.RLock()
+	stream, ok := uvcStreams[handle]
+	mu.RUnlock()
+
+	if !ok {
+		return 0
+	}
+
+	return stream.GetArrivalTimeNs()
 }
 
 //export GoUVCStreamClose
