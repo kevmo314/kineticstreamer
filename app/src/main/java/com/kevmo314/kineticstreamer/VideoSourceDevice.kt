@@ -190,6 +190,18 @@ sealed class VideoSourceDevice : Parcelable {
     }
 
     /**
+     * RTMP server video source - receives video from external RTMP publishers
+     */
+    data class RtmpServer(val port: Int = 1935) : VideoSourceDevice() {
+        override fun writeToParcel(parcel: Parcel, flags: Int) {
+            parcel.writeInt(2) // Type identifier for RtmpServer
+            parcel.writeInt(port)
+        }
+
+        override fun describeContents(): Int = 0
+    }
+
+    /**
      * Returns a unique identifier for this device for use in preferences/settings
      */
     val identifier: String
@@ -197,6 +209,7 @@ sealed class VideoSourceDevice : Parcelable {
             return when (this) {
                 is Camera -> "camera:$cameraId"
                 is UsbCamera -> "usb:${usbDevice.deviceId}"
+                is RtmpServer -> "rtmp:$port"
             }
         }
 
@@ -208,6 +221,7 @@ sealed class VideoSourceDevice : Parcelable {
             return when (this) {
                 is Camera -> "Camera $cameraId"
                 is UsbCamera -> usbDevice.productName ?: "USB Camera ${usbDevice.deviceId}"
+                is RtmpServer -> "RTMP Server (:$port)"
             }
         }
 
@@ -228,6 +242,11 @@ sealed class VideoSourceDevice : Parcelable {
                     val usbDevice = availableUsbDevices.find { it.deviceId == deviceId }
                     usbDevice?.let { UsbCamera(it) }
                 }
+                identifier.startsWith("rtmp:") -> {
+                    val portStr = identifier.removePrefix("rtmp:")
+                    val port = portStr.toIntOrNull() ?: 1935
+                    RtmpServer(port)
+                }
                 else -> null
             }
         }
@@ -238,6 +257,7 @@ sealed class VideoSourceDevice : Parcelable {
                 return when (parcel.readInt()) {
                     0 -> Camera(parcel.readString()!!)
                     1 -> UsbCamera(parcel.readParcelable(UsbDevice::class.java.classLoader)!!)
+                    2 -> RtmpServer(parcel.readInt())
                     else -> throw IllegalArgumentException("Unknown VideoSourceDevice type")
                 }
             }

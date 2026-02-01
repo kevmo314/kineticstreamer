@@ -44,8 +44,8 @@ func NewHLSSink(diskSink *BinaryDumpSink, url, bearerToken, encodedMediaFormatMi
 				w.Write([]byte("#EXT-X-TARGETDURATION:2\n"))
 				w.Write([]byte("#EXT-X-MEDIA-SEQUENCE:0\n"))
 				for _, m := range manifest {
-					w.Write([]byte(fmt.Sprintf("#EXTINF:%d,\n", (time.Duration(m.PTS) * time.Nanosecond).Seconds())))
-					w.Write([]byte(fmt.Sprintf("/%d.ucf\n", diskSink.directory, m.PTS)))
+					w.Write([]byte(fmt.Sprintf("#EXTINF:%.3f,\n", (time.Duration(m.PTS) * time.Nanosecond).Seconds())))
+					w.Write([]byte(fmt.Sprintf("/%s/%d.ucf\n", diskSink.directory, m.PTS)))
 				}
 				w.Write([]byte("#EXT-X-ENDLIST\n"))
 			} else if strings.HasSuffix(r.URL.Path, ".ts") {

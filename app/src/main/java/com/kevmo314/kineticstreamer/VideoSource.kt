@@ -13,6 +13,7 @@ import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbManager
 import android.media.MediaCodec
+import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
@@ -31,6 +32,8 @@ import kotlin.concurrent.thread
 import com.kevmo314.kineticstreamer.kinetic.UVCSource
 import com.kevmo314.kineticstreamer.kinetic.UVCStream
 import com.kevmo314.kineticstreamer.kinetic.FormatDescriptor
+import com.kevmo314.kineticstreamer.kinetic.RTMPServer
+import com.kevmo314.kineticstreamer.kinetic.RTMPSource
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.AbstractFlow
 import kotlinx.coroutines.flow.Flow
@@ -340,6 +343,231 @@ fun startUvcFrameProcessing(stream: UVCStream, outputSurface: Surface, renderer:
     return Pair(frameThread, decoder)
 }
 
+/**
+ * RTMP Audio Source - reads AAC frames from RTMPSource, decodes to PCM.
+ * Returns a Flow<ByteArray> of PCM audio data (48kHz, mono, 16-bit).
+ */
+fun RtmpAudioSource(rtmpSourceRef: AtomicReference<RTMPSource?>): Flow<TimestampedAudio> = callbackFlow {
+    Log.i("RtmpAudioSource", "Starting RTMP audio source...")
+
+    // Wait for RTMPSource to become available
+    var source: RTMPSource? = null
+    var waitCount = 0
+    while (source == null && waitCount < 120) { // Wait up to 60 seconds
+        source = rtmpSourceRef.get()
+        if (source == null) {
+            Thread.sleep(500)
+            waitCount++
+        }
+    }
+
+    if (source == null) {
+        Log.e("RtmpAudioSource", "RTMPSource not available after waiting")
+        close()
+        return@callbackFlow
+    }
+
+    Log.i("RtmpAudioSource", "RTMPSource available, setting up AAC decoder")
+
+    // Create AAC decoder
+    val aacFormat = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, 48000, 1).apply {
+        // AAC-LC profile
+        setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+        setInteger(MediaFormat.KEY_IS_ADTS, 0) // Raw AAC, not ADTS
+    }
+
+    // Queue for decoded PCM output
+    val pcmQueue = LinkedBlockingQueue<ByteArray>(30)
+    var decoderRunning = true
+
+    val decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_AAC).apply {
+        setCallback(object : MediaCodec.Callback() {
+            override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {
+                if (!decoderRunning) return
+                try {
+                    val inputBuffer = codec.getInputBuffer(index) ?: return
+                    inputBuffer.clear()
+
+                    // Read AAC frame from RTMP source (this may block briefly)
+                    val aacFrame = source.readAudioFrame()
+                    if (aacFrame == null) {
+                        // Source closed, signal EOS
+                        codec.queueInputBuffer(index, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                        return
+                    }
+
+                    inputBuffer.put(aacFrame)
+                    val pts = source.getAudioPTS()
+                    codec.queueInputBuffer(index, 0, aacFrame.size, pts, 0)
+                } catch (e: IllegalStateException) {
+                    // Decoder stopped
+                }
+            }
+
+            override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
+                if (!decoderRunning) return
+                try {
+                    if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
+                        codec.releaseOutputBuffer(index, false)
+                        return
+                    }
+
+                    val outputBuffer = codec.getOutputBuffer(index) ?: return
+                    val pcmData = ByteArray(info.size)
+                    outputBuffer.position(info.offset)
+                    outputBuffer.get(pcmData, 0, info.size)
+
+                    // Offer PCM to queue
+                    pcmQueue.offer(pcmData)
+
+                    codec.releaseOutputBuffer(index, false)
+                } catch (e: IllegalStateException) {
+                    // Decoder stopped
+                }
+            }
+
+            override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
+                Log.e("RtmpAudioSource", "AAC decoder error: ${e.message}")
+            }
+
+            override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
+                Log.i("RtmpAudioSource", "AAC decoder output format: $format")
+            }
+        })
+        configure(aacFormat, null, null, 0)
+        start()
+    }
+
+    // Thread to emit PCM data from queue to flow
+    val emitThread = thread {
+        while (decoderRunning && !source.isClosed()) {
+            val pcm = pcmQueue.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS)
+            if (pcm != null) {
+                trySend(TimestampedAudio(pcm, System.nanoTime()))
+            }
+        }
+        Log.i("RtmpAudioSource", "PCM emit thread exiting")
+    }
+
+    awaitClose {
+        Log.i("RtmpAudioSource", "Closing RTMP audio source")
+        decoderRunning = false
+        emitThread.interrupt()
+        emitThread.join()
+        try {
+            decoder.stop()
+        } catch (e: Exception) {
+            Log.e("RtmpAudioSource", "Error stopping decoder: ${e.message}")
+        }
+        decoder.release()
+    }
+}
+
+/**
+ * Start RTMP video frame processing using the given RTMPSource.
+ * This function is similar to startUvcFrameProcessing but reads from RTMP instead of UVC.
+ */
+fun startRtmpFrameProcessing(rtmpSource: RTMPSource, outputSurface: Surface, renderer: SurfaceTextureRenderer? = null): Pair<Thread, MediaCodec> {
+    val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, 1920, 1080)
+    format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+    format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 1920 * 1080)
+    format.setInteger("vendor.qcom-ext-dec-input-buffer-count.value", 30)
+    format.setInteger("input-buffer-count", 30)
+
+    var sentOA4PPS = false
+    val frameQueue = LinkedBlockingQueue<FrameWithPTS>(30)
+
+    val decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).apply {
+        setCallback(object : MediaCodec.Callback() {
+            override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {
+                if (!sentOA4PPS) {
+                    val inputBuffer = codec.getInputBuffer(index)
+                    inputBuffer?.clear()
+                    // Dummy SPS/PPS for OA4 compatibility
+                    val data = byteArrayOf(
+                        0x00.toByte(), 0x00.toByte(), 0x00.toByte(), 0x01.toByte(),
+                        0x67.toByte(), 0x64.toByte(), 0x00.toByte(), 0x34.toByte(),
+                        0xac.toByte(), 0x4d.toByte(), 0x00.toByte(), 0xf0.toByte(),
+                        0x04.toByte(), 0x4f.toByte(), 0xcb.toByte(), 0x35.toByte(),
+                        0x01.toByte(), 0x01.toByte(), 0x01.toByte(), 0x40.toByte(),
+                        0x00.toByte(), 0x00.toByte(), 0xfa.toByte(), 0x00.toByte(),
+                        0x00.toByte(), 0x3a.toByte(), 0x98.toByte(), 0x03.toByte(),
+                        0xc7.toByte(), 0x0c.toByte(), 0xa8.toByte(), 0x00.toByte(),
+                        0x00.toByte(), 0x00.toByte(), 0x01.toByte(), 0x68.toByte(),
+                        0xee.toByte(), 0x3c.toByte(), 0xb0.toByte()
+                    )
+                    inputBuffer?.put(data)
+                    codec.queueInputBuffer(index, 0, data.size, System.nanoTime() / 1000, 0)
+                    sentOA4PPS = true
+                    return
+                }
+
+                val frameWithPTS = frameQueue.poll()
+                if (frameWithPTS == null) {
+                    codec.queueInputBuffer(index, 0, 0, 0, 0)
+                    return
+                }
+
+                if (frameWithPTS.eof) {
+                    Log.w("VideoSource", "RTMP: Received EOF marker, stopping decoder")
+                    codec.stop()
+                    return
+                }
+
+                val inputBuffer = codec.getInputBuffer(index)
+                if (inputBuffer != null) {
+                    inputBuffer.clear()
+                    inputBuffer.put(frameWithPTS.data)
+                    codec.queueInputBuffer(index, 0, frameWithPTS.data.size, frameWithPTS.pts, 0)
+                } else {
+                    Log.e("VideoSource", "RTMP: Decoder input buffer is null at index $index")
+                }
+            }
+
+            override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
+                codec.releaseOutputBuffer(index, true)
+            }
+
+            override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
+                Log.e("VideoSource", "RTMP decoder error: ${e.message}")
+            }
+
+            override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
+                Log.i("VideoSource", "RTMP decoder output format: $format")
+                val width = format.getInteger(MediaFormat.KEY_WIDTH)
+                val height = format.getInteger(MediaFormat.KEY_HEIGHT)
+                val cropLeft = if (format.containsKey("crop-left")) format.getInteger("crop-left") else 0
+                val cropTop = if (format.containsKey("crop-top")) format.getInteger("crop-top") else 0
+                val cropRight = if (format.containsKey("crop-right")) format.getInteger("crop-right") else width - 1
+                val cropBottom = if (format.containsKey("crop-bottom")) format.getInteger("crop-bottom") else height - 1
+                val cropWidth = cropRight - cropLeft + 1
+                val cropHeight = cropBottom - cropTop + 1
+                Log.i("VideoSource", "RTMP decoder buffer: ${width}x${height}, crop: ($cropLeft,$cropTop)-($cropRight,$cropBottom), content: ${cropWidth}x${cropHeight}")
+                renderer?.setDecoderCrop(height, cropTop, cropBottom)
+            }
+        })
+        configure(format, outputSurface, null, 0)
+        start()
+    }
+
+    val frameThread = thread {
+        Log.i("VideoSource", "RTMP frame reader thread started")
+        while (!Thread.currentThread().isInterrupted && !rtmpSource.isClosed()) {
+            val frameData = rtmpSource.readVideoFrame()
+            if (frameData == null) {
+                Log.i("VideoSource", "RTMP: No frame received (source may be closed)")
+                frameQueue.put(FrameWithPTS(ByteArray(0), 0, true))
+                break
+            }
+            val pts = rtmpSource.getVideoPTS()
+            frameQueue.put(FrameWithPTS(frameData, pts, false))
+        }
+        Log.i("VideoSource", "RTMP frame reader thread exiting")
+    }
+
+    return Pair(frameThread, decoder)
+}
+
 // Helper function to validate H264 NAL units
 private fun validateH264Frame(data: ByteArray): Pair<Boolean, String> {
     if (data.size < 4) {
@@ -407,7 +635,8 @@ private fun validateH264Frame(data: ByteArray): Pair<Boolean, String> {
 )
 fun VideoSource(context: Context,
                 device: VideoSourceDevice,
-                renderer: SurfaceTextureRenderer? = null): Flow<SurfaceTexture> = callbackFlow {
+                renderer: SurfaceTextureRenderer? = null,
+                rtmpSourceRef: AtomicReference<RTMPSource?>? = null): Flow<SurfaceTexture> = callbackFlow {
     var cameraDevice: CameraDevice? = null
     var captureSession: CameraCaptureSession? = null
 
@@ -415,6 +644,11 @@ fun VideoSource(context: Context,
     var activeUvcStream: UVCStream? = null
     var activeDecoder: MediaCodec? = null
     var activeUvcThread: Thread? = null
+
+    // RTMP source state
+    var activeRtmpServer: RTMPServer? = null
+    var activeRtmpSource: RTMPSource? = null
+    var activeRtmpThread: Thread? = null
     val outputSurfaceTexture = SurfaceTexture(createVideoTexture()).apply {
         // Set buffer size to 1088 (macroblock-aligned) to match H.264 decoder output.
         // This avoids scaling in the transform matrix - the 1080p encoder surface
@@ -455,6 +689,33 @@ fun VideoSource(context: Context,
             cameraDevice = result.device
             captureSession = result.session
         }
+        is VideoSourceDevice.RtmpServer -> {
+            Log.i("VideoSource", "Starting RTMP server on port ${device.port}")
+            val server = RTMPServer(device.port)
+            if (!server.start()) {
+                Log.e("VideoSource", "Failed to start RTMP server")
+                close()
+                return@callbackFlow
+            }
+            activeRtmpServer = server
+            Log.i("VideoSource", "RTMP server started, waiting for publisher...")
+
+            // Wait for a publisher to connect (blocking in background thread)
+            thread {
+                val source = server.waitForSource(60000) // Wait up to 60 seconds
+                if (source != null) {
+                    Log.i("VideoSource", "RTMP publisher connected!")
+                    activeRtmpSource = source
+                    // Share the source with audio pipeline
+                    rtmpSourceRef?.set(source)
+                    val (rtmpThread, decoder) = startRtmpFrameProcessing(source, outputSurface, renderer)
+                    activeRtmpThread = rtmpThread
+                    activeDecoder = decoder
+                } else {
+                    Log.w("VideoSource", "No RTMP publisher connected within timeout")
+                }
+            }
+        }
     }
 
     if (renderer != null) {
@@ -473,9 +734,11 @@ fun VideoSource(context: Context,
     }
 
     awaitClose {
-        // Stop the frame reading thread first
+        // Stop the frame reading threads first
         activeUvcThread?.interrupt()
         activeUvcThread?.join()
+        activeRtmpThread?.interrupt()
+        activeRtmpThread?.join()
         // Stop and release the decoder before releasing surfaces
         try {
             activeDecoder?.stop()
@@ -485,6 +748,9 @@ fun VideoSource(context: Context,
         activeDecoder?.release()
         activeUvcStream?.close()
         activeUsbDeviceConnection?.close()
+        // Clean up RTMP resources
+        activeRtmpSource?.close()
+        activeRtmpServer?.close()
         captureSession?.close()
         cameraDevice?.close()
         outputSurface.release()

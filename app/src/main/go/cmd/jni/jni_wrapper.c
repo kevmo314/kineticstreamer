@@ -273,3 +273,157 @@ Java_com_kevmo314_kineticstreamer_kinetic_WHIPSink_getPeerConnectionState(JNIEnv
     free(state);  // Free the C string allocated by Go
     return result;
 }
+
+// RTMP Server JNI wrappers (64-bit platforms only)
+#if defined(__aarch64__) || defined(__x86_64__)
+
+JNIEXPORT jlong JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_RTMPServer_nativeCreate(JNIEnv* env, jobject obj, jint port) {
+    return GoCreateRTMPServer(port);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_RTMPServer_nativeStart(JNIEnv* env, jobject obj, jlong handle) {
+    return GoRTMPServerStart(handle);
+}
+
+JNIEXPORT void JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_RTMPServer_nativeStop(JNIEnv* env, jobject obj, jlong handle) {
+    GoRTMPServerStop(handle);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_RTMPServer_nativeGetPort(JNIEnv* env, jobject obj, jlong handle) {
+    return GoRTMPServerGetPort(handle);
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_RTMPServer_nativeGetSource(JNIEnv* env, jobject obj, jlong handle) {
+    return GoRTMPServerGetSource(handle);
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_RTMPServer_nativeWaitForSource(JNIEnv* env, jobject obj, jlong handle, jint timeoutMs) {
+    return GoRTMPServerWaitForSource(handle, timeoutMs);
+}
+
+// RTMP Source JNI wrappers
+
+JNIEXPORT jbyteArray JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_RTMPSource_nativeReadVideoFrame(JNIEnv* env, jobject obj, jlong handle) {
+    void* dataPtr = NULL;
+    int32_t size = 0;
+
+    int32_t success = GoRTMPSourceReadVideoFrame(handle, &dataPtr, &size);
+    if (success == 0 || dataPtr == NULL || size == 0) {
+        return NULL;
+    }
+
+    jbyteArray result = (*env)->NewByteArray(env, size);
+    if (result != NULL) {
+        (*env)->SetByteArrayRegion(env, result, 0, size, (jbyte*)dataPtr);
+    }
+
+    free(dataPtr);
+    return result;
+}
+
+JNIEXPORT jbyteArray JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_RTMPSource_nativeReadAudioFrame(JNIEnv* env, jobject obj, jlong handle) {
+    void* dataPtr = NULL;
+    int32_t size = 0;
+
+    int32_t success = GoRTMPSourceReadAudioFrame(handle, &dataPtr, &size);
+    if (success == 0 || dataPtr == NULL || size == 0) {
+        return NULL;
+    }
+
+    jbyteArray result = (*env)->NewByteArray(env, size);
+    if (result != NULL) {
+        (*env)->SetByteArrayRegion(env, result, 0, size, (jbyte*)dataPtr);
+    }
+
+    free(dataPtr);
+    return result;
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_RTMPSource_nativeGetVideoPTS(JNIEnv* env, jobject obj, jlong handle) {
+    return GoRTMPSourceGetVideoPTS(handle);
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_RTMPSource_nativeGetAudioPTS(JNIEnv* env, jobject obj, jlong handle) {
+    return GoRTMPSourceGetAudioPTS(handle);
+}
+
+JNIEXPORT jint JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_RTMPSource_nativeIsClosed(JNIEnv* env, jobject obj, jlong handle) {
+    return GoRTMPSourceIsClosed(handle);
+}
+
+JNIEXPORT void JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_RTMPSource_nativeClose(JNIEnv* env, jobject obj, jlong handle) {
+    GoRTMPSourceClose(handle);
+}
+
+#else
+// Stub implementations for 32-bit platforms
+
+JNIEXPORT jlong JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_RTMPServer_nativeCreate(JNIEnv* env, jobject obj, jint port) {
+    return 0; // RTMP not supported on 32-bit
+}
+
+JNIEXPORT jint JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_RTMPServer_nativeStart(JNIEnv* env, jobject obj, jlong handle) {
+    return 0;
+}
+
+JNIEXPORT void JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_RTMPServer_nativeStop(JNIEnv* env, jobject obj, jlong handle) {}
+
+JNIEXPORT jint JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_RTMPServer_nativeGetPort(JNIEnv* env, jobject obj, jlong handle) {
+    return 0;
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_RTMPServer_nativeGetSource(JNIEnv* env, jobject obj, jlong handle) {
+    return 0;
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_RTMPServer_nativeWaitForSource(JNIEnv* env, jobject obj, jlong handle, jint timeoutMs) {
+    return 0;
+}
+
+JNIEXPORT jbyteArray JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_RTMPSource_nativeReadVideoFrame(JNIEnv* env, jobject obj, jlong handle) {
+    return NULL;
+}
+
+JNIEXPORT jbyteArray JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_RTMPSource_nativeReadAudioFrame(JNIEnv* env, jobject obj, jlong handle) {
+    return NULL;
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_RTMPSource_nativeGetVideoPTS(JNIEnv* env, jobject obj, jlong handle) {
+    return 0;
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_RTMPSource_nativeGetAudioPTS(JNIEnv* env, jobject obj, jlong handle) {
+    return 0;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_RTMPSource_nativeIsClosed(JNIEnv* env, jobject obj, jlong handle) {
+    return 1; // Always closed on 32-bit
+}
+
+JNIEXPORT void JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_RTMPSource_nativeClose(JNIEnv* env, jobject obj, jlong handle) {}
+
+#endif // __aarch64__ || __x86_64__

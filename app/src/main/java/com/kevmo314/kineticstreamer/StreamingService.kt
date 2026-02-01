@@ -36,6 +36,8 @@ import androidx.core.app.NotificationCompat
 import com.kevmo314.kineticstreamer.kinetic.WHIPSink
 import com.kevmo314.kineticstreamer.kinetic.SRTSink
 import com.kevmo314.kineticstreamer.kinetic.PLICallback
+import com.kevmo314.kineticstreamer.kinetic.RTMPSource
+import java.util.concurrent.atomic.AtomicReference
 import android.os.Bundle
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -62,7 +64,6 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
 
 
@@ -159,6 +160,12 @@ class StreamingService : Service() {
 
     // Flow to trigger device reconnection (emits Unit when USB device changes)
     private val deviceRefreshTrigger = MutableSharedFlow<Unit>(replay = 0, extraBufferCapacity = 1)
+
+    // Shared reference to RTMPSource for audio pipeline (when video source is RTMP)
+    private val rtmpSourceRef = AtomicReference<RTMPSource?>(null)
+
+    // Track current video device type for audio source selection
+    private val currentVideoDevice = AtomicReference<VideoSourceDevice?>(null)
     
     // Timestamp synchronization
     private var streamStartTimeNanos: Long = 0
@@ -230,13 +237,15 @@ class StreamingService : Service() {
             renderer?.streamStartTimeNanos = 0
             audioSampleCount = 0
             lastVideoTimestampNanos = 0
-            
+
             // Reset FPS tracking
             frameTimestamps.clear()
             latestFps = 0f
 
+            // Clear RTMP source reference
+            rtmpSourceRef.set(null)
+
             // Remove encoder surface from renderer (keep preview surface and overlay)
-            renderer?.removeOutputSurface(videoEncoderInputSurface)
 
             // Stop and release video encoder
             videoEncoder?.stop()
@@ -1030,9 +1039,19 @@ class StreamingService : Service() {
                 Log.i("StreamingService", "Camera permission not granted")
                 return@flatMapLatest emptyFlow()
             }
+
+            // Track current video device for audio source selection
+            currentVideoDevice.set(device)
+
+            // Clear previous RTMP source when switching devices
+            if (device !is VideoSourceDevice.RtmpServer) {
+                rtmpSourceRef.set(null)
+            }
+
             Log.i("StreamingService", "Creating VideoSource for device: $device")
             // Pass renderer for direct rendering (avoids frame duplication/dropping)
-            VideoSource(this, device, renderer)
+            // Pass rtmpSourceRef so RTMP can share the source with audio
+            VideoSource(this, device, renderer, rtmpSourceRef)
         }
         .onEach { surfaceTexture ->
             // Direct rendering mode: frames are rendered automatically on GL thread
@@ -1047,12 +1066,22 @@ class StreamingService : Service() {
         // Set up audio flow - runs continuously for monitoring
         setupDebugAudioPlayback()
         audioFlowJob =
-            // Monitor the selected audio device
-            settings!!.selectedAudioDevice
+            // Combine audio device setting with video device changes
+            combine(
+                settings!!.selectedAudioDevice,
+                deviceRefreshTrigger.onStart { emit(Unit) }
+            ) { deviceId, _ -> deviceId }
             .flowOn(Dispatchers.IO) // Process audio on IO dispatcher
             .flatMapLatest { deviceId ->
-                Log.i("StreamingService", "Using selected audio device ID: $deviceId")
-                AudioSource(this, deviceId)
+                // Check if current video source is RTMP
+                val videoDevice = currentVideoDevice.get()
+                if (videoDevice is VideoSourceDevice.RtmpServer) {
+                    Log.i("StreamingService", "Using RTMP audio source (video is RTMP)")
+                    RtmpAudioSource(rtmpSourceRef)
+                } else {
+                    Log.i("StreamingService", "Using Android audio device ID: $deviceId")
+                    AudioSource(this, deviceId)
+                }
             }
             .buffer(10) // Small bounded buffer to avoid dropping audio samples
             .onEach { timestampedAudio ->
@@ -1146,7 +1175,11 @@ class StreamingService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
-        
+
+        // Clear shared RTMP source reference
+        rtmpSourceRef.set(null)
+        currentVideoDevice.set(null)
+
         // Release wake lock
         wakeLock?.release()
         wakeLock = null

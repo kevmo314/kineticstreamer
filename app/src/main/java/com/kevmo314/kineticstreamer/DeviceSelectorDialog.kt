@@ -127,6 +127,24 @@ fun DeviceSelector(
                         }
                     }
 
+                    // RTMP Server option
+                    val rtmpDevice = VideoSourceDevice.RtmpServer()
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        RadioButton(
+                            selected = selectedVideoDevice is VideoSourceDevice.RtmpServer,
+                            onClick = {
+                                onVideoDeviceSelected(rtmpDevice)
+                            }
+                        )
+                        Text(
+                            text = rtmpDevice.displayName,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+
                     Divider(modifier = Modifier.padding(vertical = 16.dp))
 
                     // Audio Devices Section

@@ -11,7 +11,7 @@ import (
 	"runtime/debug"
 	"sync"
 	"unsafe"
-	
+
 	"github.com/kevmo314/kinetic"
 )
 
@@ -24,6 +24,7 @@ var (
 	whipSinks   = make(map[int64]*kinetic.WHIPSink)
 	whipPLICallbacks = make(map[int64]func())
 	rtspServers = make(map[int64]*kinetic.RTSPServerSink)
+	// rtmpServers and rtmpSources moved to exports_rtmp.go (64-bit only)
 	nextHandle  int64 = 1
 )
 
@@ -410,3 +411,5 @@ func GoWHIPSinkGetPeerConnectionState(handle int64) *C.char {
 
 	return C.CString(sink.GetPeerConnectionState())
 }
+
+// RTMP Server exports are in exports_rtmp.go (64-bit platforms only)
