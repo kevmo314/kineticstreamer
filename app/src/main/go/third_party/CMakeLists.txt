@@ -7,20 +7,21 @@ include(ExternalProject)
 # 16KB page alignment linker flags for Android 15+
 set(PAGE_SIZE_LINKER_FLAGS "-Wl,-z,max-page-size=16384")
 
-# Host tag for NDK prebuilt toolchains (linux-x86_64, darwin-x86_64, windows-x86_64)
-# and per-host PATH separator for the OpenSSL build environment.
-# We use a non-default LIST_SEPARATOR ("|") on ExternalProject_Add for libopenssl
-# so that the PATH value (which contains ';' on Windows and ':' on Unix) is not
-# confused with CMake's list separator.
+# Host tag for NDK prebuilt toolchains (linux-x86_64, darwin-x86_64, windows-x86_64).
+# OPENSSL_PATH_ENV pins the PATH for the OpenSSL Configure/make pipeline so the
+# build is reproducible. On Windows we skip this — Windows PATH uses ';' which
+# is also CMake's list separator, and the runner's default PATH already has
+# Git Bash + perl + make. OpenSSL's Configure resolves the cross-compiler from
+# ANDROID_NDK_ROOT, so we don't need the NDK bin on PATH for the compile step.
 if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
     set(NDK_HOST_TAG "linux-x86_64")
-    set(OPENSSL_PATH "${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin:/usr/bin:/bin")
+    set(OPENSSL_PATH_ENV "PATH=${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin:/usr/bin:/bin")
 elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
     set(NDK_HOST_TAG "darwin-x86_64")
-    set(OPENSSL_PATH "${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin:/usr/bin:/bin")
+    set(OPENSSL_PATH_ENV "PATH=${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin:/usr/bin:/bin")
 elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
     set(NDK_HOST_TAG "windows-x86_64")
-    set(OPENSSL_PATH "${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin;$ENV{PATH}")
+    set(OPENSSL_PATH_ENV "")
 else()
     message(FATAL_ERROR "Unsupported host system: ${CMAKE_HOST_SYSTEM_NAME}")
 endif()
@@ -64,11 +65,8 @@ ExternalProject_Add(libopenssl
         GIT_SHALLOW 1
         GIT_SUBMODULES ""  # disable git submodules
         BUILD_IN_SOURCE 1
-        # Use a non-default LIST_SEPARATOR so embedded ';' (Windows PATH) and ':'
-        # (Unix PATH) survive the ExternalProject command list parsing.
-        LIST_SEPARATOR "|"
-        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} "PATH=${OPENSSL_PATH}" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" ./Configure ${SSL_TARGET} -D__ANDROID_API__=${ANDROID_API} --prefix=${CMAKE_INSTALL_PREFIX} --openssldir=${CMAKE_INSTALL_PREFIX}
-        BUILD_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} "PATH=${OPENSSL_PATH}" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" make -j -Wno-macro-redefined  # openssl is horrendously noisy
+        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} ${OPENSSL_PATH_ENV} "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" ./Configure ${SSL_TARGET} -D__ANDROID_API__=${ANDROID_API} --prefix=${CMAKE_INSTALL_PREFIX} --openssldir=${CMAKE_INSTALL_PREFIX}
+        BUILD_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} ${OPENSSL_PATH_ENV} "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" make -j -Wno-macro-redefined  # openssl is horrendously noisy
         INSTALL_COMMAND make install
 )
 
