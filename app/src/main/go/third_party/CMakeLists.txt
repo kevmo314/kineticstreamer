@@ -17,9 +17,11 @@ elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
     set(OPENSSL_PATH_EXTRA ":/usr/bin:/bin")
 elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
     set(NDK_HOST_TAG "windows-x86_64")
-    # Windows uses ';'. Inherit the rest of PATH via $ENV{PATH} so perl, make, and
-    # the Git-Bash shell are reachable from OpenSSL's Configure/make pipeline.
-    set(OPENSSL_PATH_EXTRA ";$ENV{PATH}")
+    # Windows PATH uses ';' as the separator, but ';' is also CMake's list separator.
+    # Escape every ';' so the PATH=... arg is a single string when passed to
+    # `cmake -E env` rather than getting list-split into per-path arguments.
+    string(REPLACE ";" "\\;" _ESCAPED_HOST_PATH "$ENV{PATH}")
+    set(OPENSSL_PATH_EXTRA "\\;${_ESCAPED_HOST_PATH}")
 else()
     message(FATAL_ERROR "Unsupported host system: ${CMAKE_HOST_SYSTEM_NAME}")
 endif()
