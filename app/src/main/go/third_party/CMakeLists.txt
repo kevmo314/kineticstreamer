@@ -23,8 +23,8 @@ elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
     set(OPENSSL_CONFIGURE ./Configure)
 elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
     set(NDK_HOST_TAG "windows-x86_64")
-    string(REPLACE ";" "\\;" _ESCAPED_HOST_PATH "$ENV{PATH}")
-    set(OPENSSL_PATH_ENV "PATH=${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin\\;${_ESCAPED_HOST_PATH}")
+    string(REPLACE ";" "|" _HOST_PATH "$ENV{PATH}")
+    set(OPENSSL_PATH_ENV "PATH=${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin|${_HOST_PATH}")
     # cmd.exe doesn't honour unix shebangs, so invoke the perl script explicitly.
     # Prefer a full Perl distribution when CI provides one; Git Bash's Perl can
     # be missing modules required by OpenSSL's Configure script.
@@ -75,6 +75,7 @@ ExternalProject_Add(libopenssl
         GIT_TAG "openssl-3.3.0"
         GIT_SHALLOW 1
         GIT_SUBMODULES ""  # disable git submodules
+        LIST_SEPARATOR |
         BUILD_IN_SOURCE 1
         CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} ${OPENSSL_PATH_ENV} "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" ${OPENSSL_CONFIGURE} ${SSL_TARGET} -D__ANDROID_API__=${ANDROID_API} --prefix=${CMAKE_INSTALL_PREFIX} --openssldir=${CMAKE_INSTALL_PREFIX}
         BUILD_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} ${OPENSSL_PATH_ENV} "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" make -j -Wno-macro-redefined  # openssl is horrendously noisy

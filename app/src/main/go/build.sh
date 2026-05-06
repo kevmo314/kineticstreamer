@@ -64,14 +64,6 @@ if [ -z "$ANDROID_NDK" ]; then
 fi
 NDK_BIN="$ANDROID_NDK/toolchains/llvm/prebuilt/$NDK_HOST_TAG/bin"
 
-if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* || "$OSTYPE" == win* ]]; then
-    if command -v cygpath &> /dev/null; then
-        export PATH="$(cygpath -u "$NDK_BIN"):$PATH"
-    else
-        export PATH="$NDK_BIN:$PATH"
-    fi
-fi
-
 echo "Using ANDROID_NDK=$ANDROID_NDK"
 echo "Using NDK_HOST_TAG=$NDK_HOST_TAG"
 echo
