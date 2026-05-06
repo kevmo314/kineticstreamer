@@ -9,10 +9,8 @@ set(PAGE_SIZE_LINKER_FLAGS "-Wl,-z,max-page-size=16384")
 
 # Host tag for NDK prebuilt toolchains (linux-x86_64, darwin-x86_64, windows-x86_64).
 # OPENSSL_PATH_ENV pins the PATH for the OpenSSL Configure/make pipeline so the
-# build is reproducible. On Windows we skip this — Windows PATH uses ';' which
-# is also CMake's list separator, and the runner's default PATH already has
-# Git Bash + perl + make. OpenSSL's Configure resolves the cross-compiler from
-# ANDROID_NDK_ROOT, so we don't need the NDK bin on PATH for the compile step.
+# build is reproducible. Windows uses ';' as PATH separator, so libopenssl uses
+# ExternalProject's LIST_SEPARATOR to keep PATH as one cmake -E env argument.
 if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
     set(NDK_HOST_TAG "linux-x86_64")
     set(OPENSSL_PATH_ENV "PATH=${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin:/usr/bin:/bin")
@@ -23,16 +21,20 @@ elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
     set(OPENSSL_CONFIGURE ./Configure)
 elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
     set(NDK_HOST_TAG "windows-x86_64")
-    set(OPENSSL_SHIM_DIR "${CMAKE_BINARY_DIR}/openssl-toolchain-shims")
-    file(MAKE_DIRECTORY "${OPENSSL_SHIM_DIR}")
-    foreach(_prefix IN ITEMS aarch64-linux-android armv7a-linux-androideabi i686-linux-android x86_64-linux-android)
-        file(WRITE "${OPENSSL_SHIM_DIR}/${_prefix}-gcc.cmd" "@echo off\r\n\"${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin/${_prefix}${ANDROID_API}-clang.cmd\" %*\r\n")
-        file(WRITE "${OPENSSL_SHIM_DIR}/${_prefix}-g++.cmd" "@echo off\r\n\"${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin/${_prefix}${ANDROID_API}-clang++.cmd\" %*\r\n")
-        file(WRITE "${OPENSSL_SHIM_DIR}/${_prefix}-ar.cmd" "@echo off\r\n\"${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin/llvm-ar.exe\" %*\r\n")
-        file(WRITE "${OPENSSL_SHIM_DIR}/${_prefix}-ranlib.cmd" "@echo off\r\n\"${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin/llvm-ranlib.exe\" %*\r\n")
-    endforeach()
+    set(OPENSSL_PATCH_SCRIPT "${CMAKE_BINARY_DIR}/patch-openssl-android.cmake")
+    file(WRITE "${OPENSSL_PATCH_SCRIPT}" [=[
+if(NOT DEFINED OPENSSL_SOURCE_DIR)
+    message(FATAL_ERROR "OPENSSL_SOURCE_DIR is required")
+endif()
+set(config_file "${OPENSSL_SOURCE_DIR}/Configurations/15-android.conf")
+file(READ "${config_file}" content)
+string(REPLACE "if (which(\"clang\") =~ m|^$ndk/.*/prebuilt/([^/]+)/|) {\n                my $host=$1;" "if (which(\"clang\")) {\n                my $host=\"windows-x86_64\";" content "${content}")
+string(REPLACE "if (which(\"llvm-ar\") =~ m|^$ndk/.*/prebuilt/([^/]+)/|) {" "if (which(\"llvm-ar\")) {" content "${content}")
+file(WRITE "${config_file}" "${content}")
+]=])
+    set(OPENSSL_PATCH_COMMAND ${CMAKE_COMMAND} "-DOPENSSL_SOURCE_DIR=<SOURCE_DIR>" -P "${OPENSSL_PATCH_SCRIPT}")
     string(REPLACE ";" "|" _HOST_PATH "$ENV{PATH}")
-    set(OPENSSL_PATH_ENV "PATH=${OPENSSL_SHIM_DIR}|${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin|${_HOST_PATH}")
+    set(OPENSSL_PATH_ENV "PATH=${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin|${_HOST_PATH}")
     # cmd.exe doesn't honour unix shebangs, so invoke the perl script explicitly.
     # Prefer a full Perl distribution when CI provides one; Git Bash's Perl can
     # be missing modules required by OpenSSL's Configure script.
@@ -43,6 +45,10 @@ elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
     endif()
 else()
     message(FATAL_ERROR "Unsupported host system: ${CMAKE_HOST_SYSTEM_NAME}")
+endif()
+
+if (NOT DEFINED OPENSSL_PATCH_COMMAND)
+    set(OPENSSL_PATCH_COMMAND "")
 endif()
 
 set(ANDROID_CMAKE_ARGS
@@ -103,6 +109,7 @@ ExternalProject_Add(libopenssl
         GIT_SHALLOW 1
         GIT_SUBMODULES ""  # disable git submodules
         LIST_SEPARATOR |
+        PATCH_COMMAND ${OPENSSL_PATCH_COMMAND}
         BUILD_IN_SOURCE 1
         CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} ${OPENSSL_PATH_ENV} "CC=${OPENSSL_CC}" "CXX=${OPENSSL_CXX}" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" ${OPENSSL_CONFIGURE} ${SSL_TARGET} -D__ANDROID_API__=${ANDROID_API} --prefix=${CMAKE_INSTALL_PREFIX} --openssldir=${CMAKE_INSTALL_PREFIX}
         BUILD_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} ${OPENSSL_PATH_ENV} "CC=${OPENSSL_CC}" "CXX=${OPENSSL_CXX}" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" make -j -Wno-macro-redefined  # openssl is horrendously noisy
