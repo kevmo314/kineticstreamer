@@ -23,7 +23,8 @@ elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
     set(OPENSSL_CONFIGURE ./Configure)
 elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
     set(NDK_HOST_TAG "windows-x86_64")
-    set(OPENSSL_PATH_ENV "")
+    string(REPLACE ";" "\\;" _ESCAPED_HOST_PATH "$ENV{PATH}")
+    set(OPENSSL_PATH_ENV "PATH=${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin\\;${_ESCAPED_HOST_PATH}")
     # cmd.exe doesn't honour unix shebangs, so invoke the perl script explicitly.
     # Prefer a full Perl distribution when CI provides one; Git Bash's Perl can
     # be missing modules required by OpenSSL's Configure script.
