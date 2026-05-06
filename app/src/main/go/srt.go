@@ -1,4 +1,4 @@
-//go:build android
+//go:build (android || darwin || linux) && cgo
 
 package kinetic
 
@@ -11,7 +11,14 @@ package kinetic
 #cgo android,386 LDFLAGS: -L${SRCDIR}/../third_party/output/x86/lib -lsrt
 #cgo android,amd64 CFLAGS: -I${SRCDIR}/../third_party/output/x86_64/include
 #cgo android,amd64 LDFLAGS: -L${SRCDIR}/../third_party/output/x86_64/lib -lsrt
-#cgo linux,amd64 CFLAGS: -I${SRCDIR}/../third_party/output/x86_64/include
+// Host build: link against a system-installed libsrt (e.g. `brew install srt`
+// on macOS or `apt install libsrt-dev` on Linux). Used by srt_test.go.
+// Try Apple Silicon brew first, then Intel brew, then system /usr/local.
+#cgo darwin,arm64,!ios CFLAGS: -I/opt/homebrew/opt/srt/include
+#cgo darwin,arm64,!ios LDFLAGS: -L/opt/homebrew/opt/srt/lib -lsrt
+#cgo darwin,amd64,!ios CFLAGS: -I/usr/local/opt/srt/include
+#cgo darwin,amd64,!ios LDFLAGS: -L/usr/local/opt/srt/lib -lsrt
+#cgo linux,!android LDFLAGS: -lsrt
 
 #include <stdint.h>
 #include <srt/srt.h>
@@ -328,8 +335,10 @@ func NewSRTSink(s, encodedMediaFormatMimeTypes string) (*SRTSink, error) {
 	}
 
 	options := map[string]string{}
-	for _, v := range parsed.Query() {
-		options[v[0]] = v[1]
+	for k, v := range parsed.Query() {
+		if len(v) > 0 {
+			options[k] = v[0]
+		}
 	}
 
 	tracks := []*mpegts.Track{}
