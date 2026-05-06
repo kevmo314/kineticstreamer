@@ -69,10 +69,6 @@ jobs:
           path: app/src/main/go/third_party/output
           key: third-party-${{ matrix.os }}-${{ hashFiles('app/src/main/go/third_party/CMakeLists.txt', 'app/src/main/go/build.sh', 'app/src/main/go/build.ps1') }}
 
-      - name: Make build script executable
-        if: runner.os != 'Windows'
-        run: chmod +x app/src/main/go/build.sh
-
       - name: Build with Gradle
         shell: bash
         run: ./gradlew assembleDebug --info --stacktrace

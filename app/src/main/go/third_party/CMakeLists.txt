@@ -16,12 +16,16 @@ set(PAGE_SIZE_LINKER_FLAGS "-Wl,-z,max-page-size=16384")
 if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
     set(NDK_HOST_TAG "linux-x86_64")
     set(OPENSSL_PATH_ENV "PATH=${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin:/usr/bin:/bin")
+    set(OPENSSL_CONFIGURE ./Configure)
 elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
     set(NDK_HOST_TAG "darwin-x86_64")
     set(OPENSSL_PATH_ENV "PATH=${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin:/usr/bin:/bin")
+    set(OPENSSL_CONFIGURE ./Configure)
 elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
     set(NDK_HOST_TAG "windows-x86_64")
     set(OPENSSL_PATH_ENV "")
+    # cmd.exe doesn't honour unix shebangs, so invoke the perl script explicitly.
+    set(OPENSSL_CONFIGURE perl Configure)
 else()
     message(FATAL_ERROR "Unsupported host system: ${CMAKE_HOST_SYSTEM_NAME}")
 endif()
@@ -65,7 +69,7 @@ ExternalProject_Add(libopenssl
         GIT_SHALLOW 1
         GIT_SUBMODULES ""  # disable git submodules
         BUILD_IN_SOURCE 1
-        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} ${OPENSSL_PATH_ENV} "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" ./Configure ${SSL_TARGET} -D__ANDROID_API__=${ANDROID_API} --prefix=${CMAKE_INSTALL_PREFIX} --openssldir=${CMAKE_INSTALL_PREFIX}
+        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} ${OPENSSL_PATH_ENV} "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" ${OPENSSL_CONFIGURE} ${SSL_TARGET} -D__ANDROID_API__=${ANDROID_API} --prefix=${CMAKE_INSTALL_PREFIX} --openssldir=${CMAKE_INSTALL_PREFIX}
         BUILD_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} ${OPENSSL_PATH_ENV} "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" make -j -Wno-macro-redefined  # openssl is horrendously noisy
         INSTALL_COMMAND make install
 )
