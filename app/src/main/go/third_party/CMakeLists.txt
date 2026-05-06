@@ -21,45 +21,42 @@ elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
     set(OPENSSL_CONFIGURE ./Configure)
 elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
     set(NDK_HOST_TAG "windows-x86_64")
-    set(OPENSSL_PERL_LIB "${CMAKE_BINARY_DIR}/openssl-perl-lib")
-    file(MAKE_DIRECTORY "${OPENSSL_PERL_LIB}/Locale/Maketext")
-    file(WRITE "${OPENSSL_PERL_LIB}/Locale/Maketext/Simple.pm" [=[
-package Locale::Maketext::Simple;
-use strict;
-use warnings;
-
-sub import {
-    my ($class, %args) = @_;
-    my $export = exists $args{Export} ? $args{Export} : 'loc';
-    return unless $export;
-
-    no strict 'refs';
-    *{caller() . "::$export"} = \&loc;
-    *{caller() . "::${export}_lang"} = sub { 1 };
-}
-
-sub loc {
-    my ($text, @args) = @_;
-    for my $i (0 .. $#args) {
-        my $number = $i + 1;
-        $text =~ s/%$number/$args[$i]/g;
-        $text =~ s/\[_$number\]/$args[$i]/g;
-    }
-    return $text;
-}
-
-1;
-]=])
-    string(SUBSTRING "${OPENSSL_PERL_LIB}" 0 1 _OPENSSL_PERL_LIB_DRIVE)
-    string(SUBSTRING "${OPENSSL_PERL_LIB}" 2 -1 _OPENSSL_PERL_LIB_PATH)
-    string(TOLOWER "${_OPENSSL_PERL_LIB_DRIVE}" _OPENSSL_PERL_LIB_DRIVE)
-    string(REPLACE "\\" "/" _OPENSSL_PERL_LIB_PATH "${_OPENSSL_PERL_LIB_PATH}")
-    set(OPENSSL_PERL_ENV "PERL5LIB=/${_OPENSSL_PERL_LIB_DRIVE}${_OPENSSL_PERL_LIB_PATH}")
     set(OPENSSL_PATCH_SCRIPT "${CMAKE_BINARY_DIR}/patch-openssl-android.cmake")
     file(WRITE "${OPENSSL_PATCH_SCRIPT}" [=[
 if(NOT DEFINED OPENSSL_SOURCE_DIR)
     message(FATAL_ERROR "OPENSSL_SOURCE_DIR is required")
 endif()
+
+set(configure_file "${OPENSSL_SOURCE_DIR}/Configure")
+file(READ "${configure_file}" configure_content)
+string(REPLACE [==[
+    if (eval { require IPC::Cmd; 1; }) {
+        IPC::Cmd->import();
+        return scalar IPC::Cmd::can_run($name);
+    } else {
+]==] [==[
+    if (0) {
+    } else {
+]==] configure_content "${configure_content}")
+string(REPLACE [==[
+        foreach (File::Spec->path()) {
+            my $fullpath = catfile($_, "$name$target{exe_extension}");
+            if (-f $fullpath and -x $fullpath) {
+                return $fullpath;
+            }
+        }
+]==] [==[
+        foreach (File::Spec->path()) {
+            foreach my $suffix ($target{exe_extension} // "", ".cmd", ".exe", "") {
+                my $fullpath = catfile($_, "$name$suffix");
+                if (-f $fullpath and -x $fullpath) {
+                    return $fullpath;
+                }
+            }
+        }
+]==] configure_content "${configure_content}")
+file(WRITE "${configure_file}" "${configure_content}")
+
 set(config_file "${OPENSSL_SOURCE_DIR}/Configurations/15-android.conf")
 file(READ "${config_file}" content)
 string(REPLACE "if (which(\"clang\") =~ m|^$ndk/.*/prebuilt/([^/]+)/|) {\n                my $host=$1;" "if (which(\"clang\")) {\n                my $host=\"windows-x86_64\";" content "${content}")
@@ -77,9 +74,6 @@ endif()
 
 if (NOT DEFINED OPENSSL_PATCH_COMMAND)
     set(OPENSSL_PATCH_COMMAND "")
-endif()
-if (NOT DEFINED OPENSSL_PERL_ENV)
-    set(OPENSSL_PERL_ENV "")
 endif()
 
 set(ANDROID_CMAKE_ARGS
@@ -142,9 +136,9 @@ ExternalProject_Add(libopenssl
         LIST_SEPARATOR |
         PATCH_COMMAND ${OPENSSL_PATCH_COMMAND}
         BUILD_IN_SOURCE 1
-        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} ${OPENSSL_PERL_ENV} ${OPENSSL_PATH_ENV} "CC=${OPENSSL_CC}" "CXX=${OPENSSL_CXX}" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" ${OPENSSL_CONFIGURE} ${SSL_TARGET} -D__ANDROID_API__=${ANDROID_API} --prefix=${CMAKE_INSTALL_PREFIX} --openssldir=${CMAKE_INSTALL_PREFIX}
-        BUILD_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} ${OPENSSL_PERL_ENV} ${OPENSSL_PATH_ENV} "CC=${OPENSSL_CC}" "CXX=${OPENSSL_CXX}" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" make -j -Wno-macro-redefined  # openssl is horrendously noisy
-        INSTALL_COMMAND ${CMAKE_COMMAND} -E env ${OPENSSL_PERL_ENV} ${OPENSSL_PATH_ENV} make install
+        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} ${OPENSSL_PATH_ENV} "CC=${OPENSSL_CC}" "CXX=${OPENSSL_CXX}" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" ${OPENSSL_CONFIGURE} ${SSL_TARGET} -D__ANDROID_API__=${ANDROID_API} --prefix=${CMAKE_INSTALL_PREFIX} --openssldir=${CMAKE_INSTALL_PREFIX}
+        BUILD_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} ${OPENSSL_PATH_ENV} "CC=${OPENSSL_CC}" "CXX=${OPENSSL_CXX}" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" make -j -Wno-macro-redefined  # openssl is horrendously noisy
+        INSTALL_COMMAND ${CMAKE_COMMAND} -E env ${OPENSSL_PATH_ENV} make install
 )
 
 ExternalProject_Add(libsrt

@@ -56,7 +56,7 @@ jobs:
           brew install cmake ninja meson
 
       # Windows OpenSSL build runs through bash + GNU make. Git Bash is
-      # preinstalled; CMake adds the small Perl compatibility shim OpenSSL needs.
+      # preinstalled; CMake patches OpenSSL's Windows tool probing for NDK tools.
       - name: Install build tools (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
