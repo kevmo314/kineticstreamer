@@ -102,7 +102,7 @@ build_third_party_arch() {
 
 deps_built() {
     for abi in "${ABIS[@]}"; do
-        for lib in libusb-1.0.so libsrt.so libcrypto.so libssl.so; do
+        for lib in libusb-1.0.so libsrt.so libcrypto.so libssl.so librist.so; do
             [ -f "$THIRD_PARTY_DIR/$abi/lib/$lib" ] || return 1
         done
     done
@@ -151,7 +151,7 @@ build_native_arch() {
         CC="$NDK_BIN/${cc_prefix}${ANDROID_API}-clang" \
         CXX="$NDK_BIN/${cc_prefix}${ANDROID_API}-clang++" \
         CGO_CFLAGS="-I$INCLUDE_DIR -I$THIRD_PARTY_DIR/$abi/include -D__ANDROID__" \
-        CGO_LDFLAGS="-L$THIRD_PARTY_DIR/$abi/lib -lusb-1.0 -lsrt -lcrypto -lssl -static-libstdc++" \
+        CGO_LDFLAGS="-L$THIRD_PARTY_DIR/$abi/lib -lusb-1.0 -lsrt -lcrypto -lssl -lrist -static-libstdc++" \
         go build -C "$SCRIPT_DIR/cmd/jni" -buildmode=c-shared \
             -ldflags="-s -w -checklinkname=0 -extldflags '-Wl,-soname,libkinetic.so -Wl,-z,max-page-size=16384'" \
             -o "$JNI_LIBS_DIR/$abi/libkinetic.so" \
@@ -161,6 +161,7 @@ build_native_arch() {
        "$THIRD_PARTY_DIR/$abi/lib/libsrt.so" \
        "$THIRD_PARTY_DIR/$abi/lib/libcrypto.so" \
        "$THIRD_PARTY_DIR/$abi/lib/libssl.so" \
+       "$THIRD_PARTY_DIR/$abi/lib/librist.so" \
        "$JNI_LIBS_DIR/$abi/"
     echo "[${abi}] Done"
 }

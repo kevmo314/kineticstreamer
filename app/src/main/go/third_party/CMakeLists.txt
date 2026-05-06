@@ -53,12 +53,24 @@ ExternalProject_Add(libusb
 
 if (ANDROID_ABI STREQUAL "armeabi-v7a")
     set(SSL_TARGET "android-arm")
+    set(MESON_TRIPLE "armv7a-linux-androideabi")
+    set(MESON_CPU_FAMILY "arm")
+    set(MESON_CPU "armv7-a")
 elseif (ANDROID_ABI STREQUAL "arm64-v8a")
     set(SSL_TARGET "android-arm64")
+    set(MESON_TRIPLE "aarch64-linux-android")
+    set(MESON_CPU_FAMILY "aarch64")
+    set(MESON_CPU "aarch64")
 elseif (ANDROID_ABI STREQUAL "x86")
     set(SSL_TARGET "android-x86")
+    set(MESON_TRIPLE "i686-linux-android")
+    set(MESON_CPU_FAMILY "x86")
+    set(MESON_CPU "i686")
 elseif (ANDROID_ABI STREQUAL "x86_64")
     set(SSL_TARGET "android-x86_64")
+    set(MESON_TRIPLE "x86_64-linux-android")
+    set(MESON_CPU_FAMILY "x86_64")
+    set(MESON_CPU "x86_64")
 else()
     message(FATAL_ERROR "Unsupported ANDROID_ABI: ${ANDROID_ABI}")
 endif()
@@ -96,4 +108,41 @@ ExternalProject_Add(libsrt
         -DENABLE_BONDING=ON
         -DENABLE_APPS=OFF
         DEPENDS libopenssl
+)
+
+# librist is built with Meson (it has no CMakeLists.txt). Generate a per-ABI
+# cross-file pointing at the NDK toolchain and drive `meson setup / compile /
+# install` from ExternalProject.
+set(MESON_NDK_BIN "${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin")
+set(MESON_CROSS_FILE "${CMAKE_CURRENT_BINARY_DIR}/meson-android-${ANDROID_ABI}.txt")
+if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
+    set(_NDK_EXT ".cmd")
+else()
+    set(_NDK_EXT "")
+endif()
+file(WRITE "${MESON_CROSS_FILE}"
+"[binaries]
+c = '${MESON_NDK_BIN}/${MESON_TRIPLE}${ANDROID_API}-clang${_NDK_EXT}'
+cpp = '${MESON_NDK_BIN}/${MESON_TRIPLE}${ANDROID_API}-clang++${_NDK_EXT}'
+ar = '${MESON_NDK_BIN}/llvm-ar${_NDK_EXT}'
+strip = '${MESON_NDK_BIN}/llvm-strip${_NDK_EXT}'
+
+[built-in options]
+c_link_args = ['${PAGE_SIZE_LINKER_FLAGS}']
+cpp_link_args = ['${PAGE_SIZE_LINKER_FLAGS}']
+
+[host_machine]
+system = 'android'
+cpu_family = '${MESON_CPU_FAMILY}'
+cpu = '${MESON_CPU}'
+endian = 'little'
+")
+
+ExternalProject_Add(librist
+        GIT_REPOSITORY "https://code.videolan.org/rist/librist.git"
+        GIT_TAG "v0.2.14"
+        GIT_SHALLOW 1
+        CONFIGURE_COMMAND meson setup --cross-file=${MESON_CROSS_FILE} --prefix=${CMAKE_INSTALL_PREFIX} --libdir=lib --buildtype=release --default-library=shared -Dbuilt_tools=false -Dtest=false -Duse_mbedtls=true -Dbuiltin_mbedtls=true --reconfigure <BINARY_DIR> <SOURCE_DIR>
+        BUILD_COMMAND meson compile -C <BINARY_DIR>
+        INSTALL_COMMAND meson install -C <BINARY_DIR>
 )
