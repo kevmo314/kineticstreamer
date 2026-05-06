@@ -55,13 +55,15 @@ jobs:
           softwareupdate --install-rosetta --agree-to-license || true
           brew install cmake ninja
 
-      # Windows OpenSSL build runs through bash + GNU make. Git Bash is preinstalled
-      # on windows-latest runners; install make via Chocolatey.
+      # Windows OpenSSL build runs through bash + GNU make. Git Bash is
+      # preinstalled, but its Perl can be missing core modules OpenSSL expects.
       - name: Install build tools (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install -y --no-progress make ninja
+          choco install -y --no-progress make ninja strawberryperl
+          "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          "OPENSSL_PERL=C:/Strawberry/perl/bin/perl.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Cache third-party C deps
         uses: actions/cache@v4

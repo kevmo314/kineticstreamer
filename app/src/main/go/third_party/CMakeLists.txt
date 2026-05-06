@@ -23,9 +23,16 @@ elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
     set(OPENSSL_CONFIGURE ./Configure)
 elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
     set(NDK_HOST_TAG "windows-x86_64")
-    set(OPENSSL_PATH_ENV "")
+    string(REPLACE ";" "|" _HOST_PATH "$ENV{PATH}")
+    set(OPENSSL_PATH_ENV "PATH=${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin|${_HOST_PATH}")
     # cmd.exe doesn't honour unix shebangs, so invoke the perl script explicitly.
-    set(OPENSSL_CONFIGURE perl Configure)
+    # Prefer a full Perl distribution when CI provides one; Git Bash's Perl can
+    # be missing modules required by OpenSSL's Configure script.
+    if (DEFINED ENV{OPENSSL_PERL})
+        set(OPENSSL_CONFIGURE "$ENV{OPENSSL_PERL}" Configure)
+    else()
+        set(OPENSSL_CONFIGURE perl Configure)
+    endif()
 else()
     message(FATAL_ERROR "Unsupported host system: ${CMAKE_HOST_SYSTEM_NAME}")
 endif()
@@ -53,21 +60,25 @@ ExternalProject_Add(libusb
 
 if (ANDROID_ABI STREQUAL "armeabi-v7a")
     set(SSL_TARGET "android-arm")
+    set(OPENSSL_CC_PREFIX "armv7a-linux-androideabi")
     set(MESON_TRIPLE "armv7a-linux-androideabi")
     set(MESON_CPU_FAMILY "arm")
     set(MESON_CPU "armv7-a")
 elseif (ANDROID_ABI STREQUAL "arm64-v8a")
     set(SSL_TARGET "android-arm64")
+    set(OPENSSL_CC_PREFIX "aarch64-linux-android")
     set(MESON_TRIPLE "aarch64-linux-android")
     set(MESON_CPU_FAMILY "aarch64")
     set(MESON_CPU "aarch64")
 elseif (ANDROID_ABI STREQUAL "x86")
     set(SSL_TARGET "android-x86")
+    set(OPENSSL_CC_PREFIX "i686-linux-android")
     set(MESON_TRIPLE "i686-linux-android")
     set(MESON_CPU_FAMILY "x86")
     set(MESON_CPU "i686")
 elseif (ANDROID_ABI STREQUAL "x86_64")
     set(SSL_TARGET "android-x86_64")
+    set(OPENSSL_CC_PREFIX "x86_64-linux-android")
     set(MESON_TRIPLE "x86_64-linux-android")
     set(MESON_CPU_FAMILY "x86_64")
     set(MESON_CPU "x86_64")
@@ -75,14 +86,18 @@ else()
     message(FATAL_ERROR "Unsupported ANDROID_ABI: ${ANDROID_ABI}")
 endif()
 
+set(OPENSSL_CC "${OPENSSL_CC_PREFIX}${ANDROID_API}-clang")
+set(OPENSSL_CXX "${OPENSSL_CC_PREFIX}${ANDROID_API}-clang++")
+
 ExternalProject_Add(libopenssl
         GIT_REPOSITORY "https://github.com/openssl/openssl.git"
         GIT_TAG "openssl-3.3.0"
         GIT_SHALLOW 1
         GIT_SUBMODULES ""  # disable git submodules
+        LIST_SEPARATOR |
         BUILD_IN_SOURCE 1
-        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} ${OPENSSL_PATH_ENV} "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" ${OPENSSL_CONFIGURE} ${SSL_TARGET} -D__ANDROID_API__=${ANDROID_API} --prefix=${CMAKE_INSTALL_PREFIX} --openssldir=${CMAKE_INSTALL_PREFIX}
-        BUILD_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} ${OPENSSL_PATH_ENV} "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" make -j -Wno-macro-redefined  # openssl is horrendously noisy
+        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} ${OPENSSL_PATH_ENV} "CC=${OPENSSL_CC}" "CXX=${OPENSSL_CXX}" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" ${OPENSSL_CONFIGURE} ${SSL_TARGET} -D__ANDROID_API__=${ANDROID_API} --prefix=${CMAKE_INSTALL_PREFIX} --openssldir=${CMAKE_INSTALL_PREFIX}
+        BUILD_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} ${OPENSSL_PATH_ENV} "CC=${OPENSSL_CC}" "CXX=${OPENSSL_CXX}" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" make -j -Wno-macro-redefined  # openssl is horrendously noisy
         INSTALL_COMMAND make install
 )
 
