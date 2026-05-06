@@ -56,15 +56,13 @@ jobs:
           brew install cmake ninja meson
 
       # Windows OpenSSL build runs through bash + GNU make. Git Bash is
-      # preinstalled, but its Perl can be missing core modules OpenSSL expects.
+      # preinstalled; CMake adds the small Perl compatibility shim OpenSSL needs.
       - name: Install build tools (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install -y --no-progress make ninja strawberryperl meson
+          choco install -y --no-progress make ninja meson
           "C:\Program Files\Meson" | Out-File -FilePath $env:GITHUB_PATH -Append
-          "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
-          "OPENSSL_PERL=C:/Strawberry/perl/bin/perl.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Cache third-party C deps
         uses: actions/cache@v4
