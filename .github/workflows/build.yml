@@ -55,19 +55,20 @@ jobs:
           softwareupdate --install-rosetta --agree-to-license || true
           brew install cmake ninja meson
 
-      - name: Set up MSYS2 Perl (Windows)
+      - name: Set up MSYS2 OpenSSL tools (Windows)
         if: runner.os == 'Windows'
         uses: msys2/setup-msys2@v2
         with:
-          install: perl
+          install: make perl
 
-      # Windows OpenSSL build runs through bash + GNU make. OpenSSL needs a
-      # Unix-style Perl with the standard modules Git Bash's Perl omits.
+      # Windows OpenSSL Android builds need Unix-style Perl and make from the
+      # same MSYS2 toolchain. Git Bash's Perl omits required core modules, and
+      # native Windows Perl is rejected by OpenSSL's Android configure logic.
       - name: Install build tools (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install -y --no-progress make ninja meson
+          choco install -y --no-progress ninja meson
           "C:\Program Files\Meson" | Out-File -FilePath $env:GITHUB_PATH -Append
           "OPENSSL_PERL=C:/msys64/usr/bin/perl.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
 
