@@ -148,18 +148,20 @@ set(MESON_CROSS_FILE "${CMAKE_CURRENT_BINARY_DIR}/meson-android-${ANDROID_ABI}.t
 set(MESON_INSTALL_PREFIX "${CMAKE_INSTALL_PREFIX}")
 set(MESON_INSTALL_COMMAND meson install -C <BINARY_DIR>)
 if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
-    set(_NDK_EXT ".cmd")
+    set(_NDK_CLANG_EXT ".cmd")
+    set(_NDK_LLVM_EXT ".exe")
     set(MESON_INSTALL_PREFIX "/")
     set(MESON_INSTALL_COMMAND ${CMAKE_COMMAND} -E env "DESTDIR=${CMAKE_INSTALL_PREFIX}" meson install -C <BINARY_DIR>)
 else()
-    set(_NDK_EXT "")
+    set(_NDK_CLANG_EXT "")
+    set(_NDK_LLVM_EXT "")
 endif()
 file(WRITE "${MESON_CROSS_FILE}"
 "[binaries]
-c = '${MESON_NDK_BIN}/${MESON_TRIPLE}${ANDROID_API}-clang${_NDK_EXT}'
-cpp = '${MESON_NDK_BIN}/${MESON_TRIPLE}${ANDROID_API}-clang++${_NDK_EXT}'
-ar = '${MESON_NDK_BIN}/llvm-ar${_NDK_EXT}'
-strip = '${MESON_NDK_BIN}/llvm-strip${_NDK_EXT}'
+c = '${MESON_NDK_BIN}/${MESON_TRIPLE}${ANDROID_API}-clang${_NDK_CLANG_EXT}'
+cpp = '${MESON_NDK_BIN}/${MESON_TRIPLE}${ANDROID_API}-clang++${_NDK_CLANG_EXT}'
+ar = '${MESON_NDK_BIN}/llvm-ar${_NDK_LLVM_EXT}'
+strip = '${MESON_NDK_BIN}/llvm-strip${_NDK_LLVM_EXT}'
 
 [built-in options]
 c_link_args = ['${PAGE_SIZE_LINKER_FLAGS}']
