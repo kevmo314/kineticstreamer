@@ -146,9 +146,11 @@ ExternalProject_Add(libsrt
 set(MESON_NDK_BIN "${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin")
 set(MESON_CROSS_FILE "${CMAKE_CURRENT_BINARY_DIR}/meson-android-${ANDROID_ABI}.txt")
 set(MESON_INSTALL_PREFIX "${CMAKE_INSTALL_PREFIX}")
+set(MESON_INSTALL_COMMAND meson install -C <BINARY_DIR>)
 if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
     set(_NDK_EXT ".cmd")
-    file(TO_NATIVE_PATH "${CMAKE_INSTALL_PREFIX}" MESON_INSTALL_PREFIX)
+    set(MESON_INSTALL_PREFIX "/")
+    set(MESON_INSTALL_COMMAND ${CMAKE_COMMAND} -E env "DESTDIR=${CMAKE_INSTALL_PREFIX}" meson install -C <BINARY_DIR>)
 else()
     set(_NDK_EXT "")
 endif()
@@ -176,5 +178,5 @@ ExternalProject_Add(librist
         GIT_SHALLOW 1
         CONFIGURE_COMMAND meson setup --cross-file=${MESON_CROSS_FILE} --prefix=${MESON_INSTALL_PREFIX} --libdir=lib --buildtype=release --default-library=shared -Dbuilt_tools=false -Dtest=false -Duse_mbedtls=true -Dbuiltin_mbedtls=true --reconfigure <BINARY_DIR> <SOURCE_DIR>
         BUILD_COMMAND meson compile -C <BINARY_DIR>
-        INSTALL_COMMAND meson install -C <BINARY_DIR>
+        INSTALL_COMMAND ${MESON_INSTALL_COMMAND}
 )
