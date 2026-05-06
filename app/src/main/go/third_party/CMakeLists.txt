@@ -9,19 +9,18 @@ set(PAGE_SIZE_LINKER_FLAGS "-Wl,-z,max-page-size=16384")
 
 # Host tag for NDK prebuilt toolchains (linux-x86_64, darwin-x86_64, windows-x86_64)
 # and per-host PATH separator for the OpenSSL build environment.
+# We use a non-default LIST_SEPARATOR ("|") on ExternalProject_Add for libopenssl
+# so that the PATH value (which contains ';' on Windows and ':' on Unix) is not
+# confused with CMake's list separator.
 if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
     set(NDK_HOST_TAG "linux-x86_64")
-    set(OPENSSL_PATH_EXTRA ":/usr/bin:/bin")
+    set(OPENSSL_PATH "${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin:/usr/bin:/bin")
 elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
     set(NDK_HOST_TAG "darwin-x86_64")
-    set(OPENSSL_PATH_EXTRA ":/usr/bin:/bin")
+    set(OPENSSL_PATH "${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin:/usr/bin:/bin")
 elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
     set(NDK_HOST_TAG "windows-x86_64")
-    # Windows PATH uses ';' as the separator, but ';' is also CMake's list separator.
-    # Escape every ';' so the PATH=... arg is a single string when passed to
-    # `cmake -E env` rather than getting list-split into per-path arguments.
-    string(REPLACE ";" "\\;" _ESCAPED_HOST_PATH "$ENV{PATH}")
-    set(OPENSSL_PATH_EXTRA "\\;${_ESCAPED_HOST_PATH}")
+    set(OPENSSL_PATH "${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin;$ENV{PATH}")
 else()
     message(FATAL_ERROR "Unsupported host system: ${CMAKE_HOST_SYSTEM_NAME}")
 endif()
@@ -65,10 +64,11 @@ ExternalProject_Add(libopenssl
         GIT_SHALLOW 1
         GIT_SUBMODULES ""  # disable git submodules
         BUILD_IN_SOURCE 1
-        # configure an explicit path to improve build reproducibility
-        # Add LDFLAGS for 16KB page alignment
-        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} "PATH=${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin${OPENSSL_PATH_EXTRA}" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" ./Configure ${SSL_TARGET} -D__ANDROID_API__=${ANDROID_API} --prefix=${CMAKE_INSTALL_PREFIX} --openssldir=${CMAKE_INSTALL_PREFIX}
-        BUILD_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} "PATH=${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin${OPENSSL_PATH_EXTRA}" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" make -j -Wno-macro-redefined  # openssl is horrendously noisy
+        # Use a non-default LIST_SEPARATOR so embedded ';' (Windows PATH) and ':'
+        # (Unix PATH) survive the ExternalProject command list parsing.
+        LIST_SEPARATOR "|"
+        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} "PATH=${OPENSSL_PATH}" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" ./Configure ${SSL_TARGET} -D__ANDROID_API__=${ANDROID_API} --prefix=${CMAKE_INSTALL_PREFIX} --openssldir=${CMAKE_INSTALL_PREFIX}
+        BUILD_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} "PATH=${OPENSSL_PATH}" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" make -j -Wno-macro-redefined  # openssl is horrendously noisy
         INSTALL_COMMAND make install
 )
 

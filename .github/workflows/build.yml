@@ -42,15 +42,18 @@ jobs:
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r27c
-          local-cache: true
 
       - name: Install build tools (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
 
+      # macos-latest is Apple Silicon and the NDK r27 toolchain is darwin-x86_64.
+      # Install Rosetta 2 so the cross-compiler binaries can execute.
       - name: Install build tools (macOS)
         if: runner.os == 'macOS'
-        run: brew install cmake ninja
+        run: |
+          softwareupdate --install-rosetta --agree-to-license || true
+          brew install cmake ninja
 
       # Windows OpenSSL build runs through bash + GNU make. Git Bash is preinstalled
       # on windows-latest runners; install make via Chocolatey.
@@ -77,9 +80,11 @@ jobs:
           ANDROID_NDK: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
+      # Only upload from Linux. macOS/Windows runs are just verifying the build works.
       - name: Upload APK
+        if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug-${{ matrix.os }}
+          name: app-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           retention-days: 14
