@@ -102,9 +102,16 @@ build_third_party_arch() {
 
 deps_built() {
     for abi in "${ABIS[@]}"; do
-        for lib in libusb-1.0.so libsrt.so libcrypto.so libssl.so librist.so; do
+        for lib in libusb-1.0.so libsrt.so librist.so; do
             [ -f "$THIRD_PARTY_DIR/$abi/lib/$lib" ] || return 1
         done
+        if [ "$NDK_HOST_TAG" = "windows-x86_64" ]; then
+            [ -f "$THIRD_PARTY_DIR/$abi/lib/libcrypto.a" ] || return 1
+            [ -f "$THIRD_PARTY_DIR/$abi/lib/libssl.a" ] || return 1
+        else
+            [ -f "$THIRD_PARTY_DIR/$abi/lib/libcrypto.so" ] || return 1
+            [ -f "$THIRD_PARTY_DIR/$abi/lib/libssl.so" ] || return 1
+        fi
     done
     return 0
 }
@@ -151,7 +158,7 @@ build_native_arch() {
         CC="$NDK_BIN/${cc_prefix}${ANDROID_API}-clang" \
         CXX="$NDK_BIN/${cc_prefix}${ANDROID_API}-clang++" \
         CGO_CFLAGS="-I$INCLUDE_DIR -I$THIRD_PARTY_DIR/$abi/include -D__ANDROID__" \
-        CGO_LDFLAGS="-L$THIRD_PARTY_DIR/$abi/lib -lusb-1.0 -lsrt -lcrypto -lssl -lrist -static-libstdc++" \
+        CGO_LDFLAGS="-L$THIRD_PARTY_DIR/$abi/lib -lusb-1.0 -lsrt -lssl -lcrypto -lrist -ldl -static-libstdc++" \
         go build -C "$SCRIPT_DIR/cmd/jni" -buildmode=c-shared \
             -ldflags="-s -w -checklinkname=0 -extldflags '-Wl,-soname,libkinetic.so -Wl,-z,max-page-size=16384'" \
             -o "$JNI_LIBS_DIR/$abi/libkinetic.so" \
@@ -159,10 +166,11 @@ build_native_arch() {
 
     cp "$THIRD_PARTY_DIR/$abi/lib/libusb-1.0.so" \
        "$THIRD_PARTY_DIR/$abi/lib/libsrt.so" \
-       "$THIRD_PARTY_DIR/$abi/lib/libcrypto.so" \
-       "$THIRD_PARTY_DIR/$abi/lib/libssl.so" \
        "$THIRD_PARTY_DIR/$abi/lib/librist.so" \
        "$JNI_LIBS_DIR/$abi/"
+    for lib in libcrypto.so libssl.so; do
+        [ ! -f "$THIRD_PARTY_DIR/$abi/lib/$lib" ] || cp "$THIRD_PARTY_DIR/$abi/lib/$lib" "$JNI_LIBS_DIR/$abi/"
+    done
     echo "[${abi}] Done"
 }
 
