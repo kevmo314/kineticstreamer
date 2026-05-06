@@ -23,8 +23,16 @@ elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
     set(OPENSSL_CONFIGURE ./Configure)
 elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
     set(NDK_HOST_TAG "windows-x86_64")
+    set(OPENSSL_SHIM_DIR "${CMAKE_BINARY_DIR}/openssl-toolchain-shims")
+    file(MAKE_DIRECTORY "${OPENSSL_SHIM_DIR}")
+    foreach(_prefix IN ITEMS aarch64-linux-android armv7a-linux-androideabi i686-linux-android x86_64-linux-android)
+        file(WRITE "${OPENSSL_SHIM_DIR}/${_prefix}-gcc.cmd" "@echo off\r\n\"${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin/${_prefix}${ANDROID_API}-clang.cmd\" %*\r\n")
+        file(WRITE "${OPENSSL_SHIM_DIR}/${_prefix}-g++.cmd" "@echo off\r\n\"${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin/${_prefix}${ANDROID_API}-clang++.cmd\" %*\r\n")
+        file(WRITE "${OPENSSL_SHIM_DIR}/${_prefix}-ar.cmd" "@echo off\r\n\"${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin/llvm-ar.exe\" %*\r\n")
+        file(WRITE "${OPENSSL_SHIM_DIR}/${_prefix}-ranlib.cmd" "@echo off\r\n\"${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin/llvm-ranlib.exe\" %*\r\n")
+    endforeach()
     string(REPLACE ";" "|" _HOST_PATH "$ENV{PATH}")
-    set(OPENSSL_PATH_ENV "PATH=${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin|${_HOST_PATH}")
+    set(OPENSSL_PATH_ENV "PATH=${OPENSSL_SHIM_DIR}|${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin|${_HOST_PATH}")
     # cmd.exe doesn't honour unix shebangs, so invoke the perl script explicitly.
     # Prefer a full Perl distribution when CI provides one; Git Bash's Perl can
     # be missing modules required by OpenSSL's Configure script.
