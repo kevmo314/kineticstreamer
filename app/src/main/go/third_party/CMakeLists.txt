@@ -57,6 +57,31 @@ string(REPLACE [==[
 ]==] configure_content "${configure_content}")
 file(WRITE "${configure_file}" "${configure_content}")
 
+set(config_pm_file "${OPENSSL_SOURCE_DIR}/util/perl/OpenSSL/config.pm")
+file(READ "${config_pm_file}" config_pm_content)
+string(REPLACE "use IPC::Cmd;\n" "" config_pm_content "${config_pm_content}")
+string(REPLACE [==[
+my @c_compilers = qw(clang gcc cc);
+]==] [==[
+my @c_compilers = qw(clang gcc cc);
+
+sub openssl_can_run {
+    my $name = shift;
+    return $name if (File::Spec->splitpath($name))[1] && -f $name;
+
+    foreach my $dir (File::Spec->path()) {
+        foreach my $suffix ("", ".cmd", ".exe") {
+            my $fullpath = File::Spec->catfile($dir, "$name$suffix");
+            return $fullpath if -f $fullpath;
+        }
+    }
+
+    return undef;
+}
+]==] config_pm_content "${config_pm_content}")
+string(REPLACE "IPC::Cmd::can_run" "openssl_can_run" config_pm_content "${config_pm_content}")
+file(WRITE "${config_pm_file}" "${config_pm_content}")
+
 set(config_file "${OPENSSL_SOURCE_DIR}/Configurations/15-android.conf")
 file(READ "${config_file}" content)
 string(REPLACE "if (which(\"clang\") =~ m|^$ndk/.*/prebuilt/([^/]+)/|) {\n                my $host=$1;" "if (which(\"clang\")) {\n                my $host=\"windows-x86_64\";" content "${content}")
