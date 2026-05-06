@@ -21,81 +21,19 @@ elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
     set(OPENSSL_CONFIGURE ./Configure)
 elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
     set(NDK_HOST_TAG "windows-x86_64")
-    set(OPENSSL_PATCH_SCRIPT "${CMAKE_BINARY_DIR}/patch-openssl-android.cmake")
-    file(WRITE "${OPENSSL_PATCH_SCRIPT}" [=[
-if(NOT DEFINED OPENSSL_SOURCE_DIR)
-    message(FATAL_ERROR "OPENSSL_SOURCE_DIR is required")
-endif()
-
-set(configure_file "${OPENSSL_SOURCE_DIR}/Configure")
-file(READ "${configure_file}" configure_content)
-string(REPLACE [==[
-    if (eval { require IPC::Cmd; 1; }) {
-        IPC::Cmd->import();
-        return scalar IPC::Cmd::can_run($name);
-    } else {
-]==] [==[
-    if (0) {
-    } else {
-]==] configure_content "${configure_content}")
-string(REPLACE [==[
-        foreach (File::Spec->path()) {
-            my $fullpath = catfile($_, "$name$target{exe_extension}");
-            if (-f $fullpath and -x $fullpath) {
-                return $fullpath;
-            }
-        }
-]==] [==[
-        foreach (File::Spec->path()) {
-            foreach my $suffix ($target{exe_extension} // "", ".cmd", ".exe", "") {
-                my $fullpath = catfile($_, "$name$suffix");
-                if (-f $fullpath and -x $fullpath) {
-                    return $fullpath;
-                }
-            }
-        }
-]==] configure_content "${configure_content}")
-file(WRITE "${configure_file}" "${configure_content}")
-
-set(config_pm_file "${OPENSSL_SOURCE_DIR}/util/perl/OpenSSL/config.pm")
-file(READ "${config_pm_file}" config_pm_content)
-string(REPLACE "use IPC::Cmd;\n" "" config_pm_content "${config_pm_content}")
-string(REPLACE [==[
-my @c_compilers = qw(clang gcc cc);
-]==] [==[
-my @c_compilers = qw(clang gcc cc);
-
-sub openssl_can_run {
-    my $name = shift;
-    return $name if (File::Spec->splitpath($name))[1] && -f $name;
-
-    foreach my $dir (File::Spec->path()) {
-        foreach my $suffix ("", ".cmd", ".exe") {
-            my $fullpath = File::Spec->catfile($dir, "$name$suffix");
-            return $fullpath if -f $fullpath;
-        }
-    }
-
-    return undef;
-}
-]==] config_pm_content "${config_pm_content}")
-string(REPLACE "IPC::Cmd::can_run" "openssl_can_run" config_pm_content "${config_pm_content}")
-file(WRITE "${config_pm_file}" "${config_pm_content}")
-
-set(config_file "${OPENSSL_SOURCE_DIR}/Configurations/15-android.conf")
-file(READ "${config_file}" content)
-string(REPLACE "if (which(\"clang\") =~ m|^$ndk/.*/prebuilt/([^/]+)/|) {\n                my $host=$1;" "if (which(\"clang\")) {\n                my $host=\"windows-x86_64\";" content "${content}")
-string(REPLACE "if (which(\"llvm-ar\") =~ m|^$ndk/.*/prebuilt/([^/]+)/|) {" "if (which(\"llvm-ar\")) {" content "${content}")
-file(WRITE "${config_file}" "${content}")
-]=])
-    set(OPENSSL_PATCH_COMMAND ${CMAKE_COMMAND} "-DOPENSSL_SOURCE_DIR=<SOURCE_DIR>" -P "${OPENSSL_PATCH_SCRIPT}")
     string(REPLACE ";" "|" _HOST_PATH "$ENV{PATH}")
     if (DEFINED ENV{OPENSSL_PERL})
         get_filename_component(OPENSSL_PERL_DIR "$ENV{OPENSSL_PERL}" DIRECTORY)
+        string(SUBSTRING "${ANDROID_NDK}" 0 1 _OPENSSL_NDK_DRIVE)
+        string(SUBSTRING "${ANDROID_NDK}" 2 -1 _OPENSSL_NDK_PATH)
+        string(TOLOWER "${_OPENSSL_NDK_DRIVE}" _OPENSSL_NDK_DRIVE)
+        string(REPLACE "\\" "/" _OPENSSL_NDK_PATH "${_OPENSSL_NDK_PATH}")
+        set(OPENSSL_ANDROID_NDK_ROOT "/${_OPENSSL_NDK_DRIVE}${_OPENSSL_NDK_PATH}")
         set(OPENSSL_PATH_ENV "PATH=${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin|${OPENSSL_PERL_DIR}|${_HOST_PATH}")
         set(OPENSSL_PERL_ENV "PERL=$ENV{OPENSSL_PERL}")
         set(OPENSSL_CONFIGURE "$ENV{OPENSSL_PERL}" Configure)
     else()
+        set(OPENSSL_ANDROID_NDK_ROOT "${ANDROID_NDK}")
         set(OPENSSL_PATH_ENV "PATH=${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin|${_HOST_PATH}")
         set(OPENSSL_PERL_ENV "")
         set(OPENSSL_CONFIGURE perl Configure)
@@ -110,6 +48,9 @@ if (NOT DEFINED OPENSSL_PATCH_COMMAND)
 endif()
 if (NOT DEFINED OPENSSL_PERL_ENV)
     set(OPENSSL_PERL_ENV "")
+endif()
+if (NOT DEFINED OPENSSL_ANDROID_NDK_ROOT)
+    set(OPENSSL_ANDROID_NDK_ROOT "${ANDROID_NDK}")
 endif()
 
 set(ANDROID_CMAKE_ARGS
@@ -172,8 +113,8 @@ ExternalProject_Add(libopenssl
         LIST_SEPARATOR |
         PATCH_COMMAND ${OPENSSL_PATCH_COMMAND}
         BUILD_IN_SOURCE 1
-        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} ${OPENSSL_PERL_ENV} ${OPENSSL_PATH_ENV} "CC=${OPENSSL_CC}" "CXX=${OPENSSL_CXX}" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" ${OPENSSL_CONFIGURE} ${SSL_TARGET} -D__ANDROID_API__=${ANDROID_API} --prefix=${CMAKE_INSTALL_PREFIX} --openssldir=${CMAKE_INSTALL_PREFIX}
-        BUILD_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} ${OPENSSL_PERL_ENV} ${OPENSSL_PATH_ENV} "CC=${OPENSSL_CC}" "CXX=${OPENSSL_CXX}" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" make -j -Wno-macro-redefined  # openssl is horrendously noisy
+        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${OPENSSL_ANDROID_NDK_ROOT} ${OPENSSL_PERL_ENV} ${OPENSSL_PATH_ENV} "CC=${OPENSSL_CC}" "CXX=${OPENSSL_CXX}" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" ${OPENSSL_CONFIGURE} ${SSL_TARGET} -D__ANDROID_API__=${ANDROID_API} --prefix=${CMAKE_INSTALL_PREFIX} --openssldir=${CMAKE_INSTALL_PREFIX}
+        BUILD_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${OPENSSL_ANDROID_NDK_ROOT} ${OPENSSL_PERL_ENV} ${OPENSSL_PATH_ENV} "CC=${OPENSSL_CC}" "CXX=${OPENSSL_CXX}" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" make -j -Wno-macro-redefined  # openssl is horrendously noisy
         INSTALL_COMMAND ${CMAKE_COMMAND} -E env ${OPENSSL_PERL_ENV} ${OPENSSL_PATH_ENV} make install
 )
 
