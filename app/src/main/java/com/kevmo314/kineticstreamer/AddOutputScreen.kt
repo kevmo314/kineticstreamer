@@ -72,6 +72,13 @@ fun AddOutputScreen(
                     modifier = Modifier.fillMaxWidth()
                 )
             }
+            Surface(onClick = { navigateTo("settings/output/rist") }) {
+                ListItem(
+                    headlineContent = { Text("RIST") },
+                    supportingContent = { Text("Reliable Internet Stream Transport") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
             Surface(onClick = { navigateTo("settings/output/rtmp") }) {
                 ListItem(
                     headlineContent = { Text("RTMP") },
@@ -268,6 +275,100 @@ fun AddSrtOutputScreen(
                 value = streamId,
                 onValueChange = setStreamId,
                 label = { Text("Stream ID (optional)") },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 16.dp),
+                singleLine = true
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AddRistOutputScreen(
+    onSave: (OutputConfiguration) -> Unit,
+    onDelete: (() -> Unit)? = null,
+    navigateBack: () -> Unit,
+    initialHost: String = "",
+    initialPort: String = "1968",
+    initialCname: String = "",
+) {
+    val (host, setHost) = remember { mutableStateOf(initialHost) }
+    val (port, setPort) = remember { mutableStateOf(initialPort) }
+    val (cname, setCname) = remember { mutableStateOf(initialCname) }
+    val isEditing = initialHost.isNotEmpty()
+
+    Scaffold(
+        topBar = {
+            CenterAlignedTopAppBar(
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    titleContentColor = MaterialTheme.colorScheme.primary,
+                ),
+                title = { Text(if (isEditing) "Edit RIST Output" else "RIST Output") },
+                navigationIcon = {
+                    IconButton(onClick = navigateBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+                actions = {
+                    if (isEditing && onDelete != null) {
+                        IconButton(onClick = {
+                            onDelete()
+                            navigateBack()
+                        }) {
+                            Icon(Icons.Filled.Delete, contentDescription = "Delete")
+                        }
+                    }
+                    IconButton(
+                        onClick = {
+                            if (host.isNotBlank()) {
+                                val url = if (cname.isNotBlank()) {
+                                    "rist://$host:$port?cname=$cname"
+                                } else {
+                                    "rist://$host:$port"
+                                }
+                                onSave(OutputConfiguration(url = url, enabled = true))
+                                navigateBack()
+                            }
+                        },
+                        enabled = host.isNotBlank()
+                    ) {
+                        Icon(Icons.Filled.Check, contentDescription = "Save")
+                    }
+                }
+            )
+        }
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .padding(padding)
+                .fillMaxSize()
+                .padding(16.dp)
+        ) {
+            OutlinedTextField(
+                value = host,
+                onValueChange = setHost,
+                label = { Text("Host") },
+                placeholder = { Text("rist.example.com") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+            OutlinedTextField(
+                value = port,
+                onValueChange = setPort,
+                label = { Text("Port") },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 16.dp),
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+            )
+            OutlinedTextField(
+                value = cname,
+                onValueChange = setCname,
+                label = { Text("CNAME (optional)") },
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 16.dp),

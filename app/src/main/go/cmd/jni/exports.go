@@ -19,6 +19,7 @@ import (
 var (
 	mu          sync.RWMutex
 	srtSinks    = make(map[int64]*kinetic.SRTSink)
+	ristSinks   = make(map[int64]*kinetic.RISTSink)
 	uvcSources  = make(map[int64]*kinetic.UVCSource)
 	uvcStreams  = make(map[int64]*kinetic.UVCStream)
 	whipSinks   = make(map[int64]*kinetic.WHIPSink)
@@ -138,6 +139,78 @@ type srtPLICallbackWrapper struct {
 
 func (w *srtPLICallbackWrapper) OnPLI() {
 	C.GoSRTOnPLI(C.int64_t(w.handle))
+}
+
+//export GoCreateRISTSink
+func GoCreateRISTSink(urlStr *C.char, mimeTypesStr *C.char) (handle int64) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("PANIC in GoCreateRISTSink: %v\nStack trace:\n%s", r, debug.Stack())
+			handle = 0
+		}
+	}()
+
+	url := C.GoString(urlStr)
+	mimeTypes := C.GoString(mimeTypesStr)
+
+	sink, err := kinetic.NewRISTSink(url, mimeTypes)
+	if err != nil {
+		log.Printf("Failed to create RIST sink: %v", err)
+		return 0
+	}
+
+	mu.Lock()
+	handle = nextHandle
+	nextHandle++
+	ristSinks[handle] = sink
+	mu.Unlock()
+
+	return handle
+}
+
+//export GoRISTSinkWriteSample
+func GoRISTSinkWriteSample(handle int64, streamIndex int32, data unsafe.Pointer, length int32, ptsMicroseconds int64, flags int32) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("PANIC in GoRISTSinkWriteSample: %v\nStack trace:\n%s", r, debug.Stack())
+		}
+	}()
+
+	mu.RLock()
+	sink, ok := ristSinks[handle]
+	mu.RUnlock()
+	if !ok {
+		return
+	}
+
+	goData := (*[1 << 30]byte)(data)[:length:length]
+	sink.WriteSample(int(streamIndex), goData, ptsMicroseconds, flags)
+}
+
+//export GoRISTSinkWriteH264
+func GoRISTSinkWriteH264(handle int64, data unsafe.Pointer, length int32, pts int64) {
+	GoRISTSinkWriteSample(handle, 0, data, length, pts, 0)
+}
+
+//export GoRISTSinkWriteH265
+func GoRISTSinkWriteH265(handle int64, data unsafe.Pointer, length int32, pts int64) {
+	GoRISTSinkWriteSample(handle, 0, data, length, pts, 0)
+}
+
+//export GoRISTSinkWriteOpus
+func GoRISTSinkWriteOpus(handle int64, data unsafe.Pointer, length int32, pts int64) {
+	GoRISTSinkWriteSample(handle, 1, data, length, pts, 0)
+}
+
+//export GoRISTSinkClose
+func GoRISTSinkClose(handle int64) {
+	mu.Lock()
+	sink, ok := ristSinks[handle]
+	if ok {
+		sink.Close()
+		delete(ristSinks, handle)
+	}
+	mu.Unlock()
 }
 
 //export GoCreateUVCSource

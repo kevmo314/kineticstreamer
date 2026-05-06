@@ -114,6 +114,47 @@ Java_com_kevmo314_kineticstreamer_kinetic_SRTSink_setPLICallback(JNIEnv* env, jo
     GoSRTSinkSetPLICallback(handle);
 }
 
+// ---- RIST sink JNI bridge ---------------------------------------------------
+
+JNIEXPORT jlong JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_RISTSink_create(JNIEnv* env, jclass clazz, jstring url, jstring mimeTypes) {
+    const char* urlStr = (*env)->GetStringUTFChars(env, url, NULL);
+    const char* mimeTypesStr = (*env)->GetStringUTFChars(env, mimeTypes, NULL);
+    jlong handle = GoCreateRISTSink((char*)urlStr, (char*)mimeTypesStr);
+    (*env)->ReleaseStringUTFChars(env, url, urlStr);
+    (*env)->ReleaseStringUTFChars(env, mimeTypes, mimeTypesStr);
+    return handle;
+}
+
+JNIEXPORT void JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_RISTSink_writeH264(JNIEnv* env, jobject obj, jlong handle, jbyteArray data, jlong pts) {
+    jbyte* bytes = jbyteArray_to_bytes(env, data);
+    jsize length = (*env)->GetArrayLength(env, data);
+    GoRISTSinkWriteH264(handle, bytes, length, pts);
+    release_bytes(env, data, bytes);
+}
+
+JNIEXPORT void JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_RISTSink_writeH265(JNIEnv* env, jobject obj, jlong handle, jbyteArray data, jlong pts) {
+    jbyte* bytes = jbyteArray_to_bytes(env, data);
+    jsize length = (*env)->GetArrayLength(env, data);
+    GoRISTSinkWriteH265(handle, bytes, length, pts);
+    release_bytes(env, data, bytes);
+}
+
+JNIEXPORT void JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_RISTSink_writeOpus(JNIEnv* env, jobject obj, jlong handle, jbyteArray data, jlong pts) {
+    jbyte* bytes = jbyteArray_to_bytes(env, data);
+    jsize length = (*env)->GetArrayLength(env, data);
+    GoRISTSinkWriteOpus(handle, bytes, length, pts);
+    release_bytes(env, data, bytes);
+}
+
+JNIEXPORT void JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_RISTSink_close(JNIEnv* env, jobject obj, jlong handle) {
+    GoRISTSinkClose(handle);
+}
+
 // Called from Go when SRT detects packet loss
 void GoSRTOnPLI(int64_t handle) {
     if (g_jvm == NULL || handle >= 100 || g_srtPLICallbacks[handle] == NULL) return;

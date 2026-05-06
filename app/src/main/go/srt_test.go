@@ -93,5 +93,5 @@ func assertMPEGTS(t *testing.T, got []byte) {
 				off, got[off], got[off:end])
 		}
 	}
-	t.Logf("received %d bytes (%d MPEG-TS packets) over SRT", len(got), len(got)/188)
+	t.Logf("received %d bytes (%d MPEG-TS packets)", len(got), len(got)/188)
 }

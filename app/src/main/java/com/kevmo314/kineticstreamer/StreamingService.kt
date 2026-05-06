@@ -34,6 +34,7 @@ import android.view.Surface
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import com.kevmo314.kineticstreamer.kinetic.WHIPSink
+import com.kevmo314.kineticstreamer.kinetic.RISTSink
 import com.kevmo314.kineticstreamer.kinetic.SRTSink
 import com.kevmo314.kineticstreamer.kinetic.PLICallback
 import com.kevmo314.kineticstreamer.kinetic.RTMPSource
@@ -141,6 +142,7 @@ class StreamingService : Service() {
     private var webViewOverlay: WebViewOverlay? = null
     private var whipSink: WHIPSink? = null
     private var srtSink: SRTSink? = null
+    private var ristSink: RISTSink? = null
     private var networkExecutor: ExecutorService? = null  // Dedicated thread for network writes
     @Volatile private var lastBitrate: Int = 0 // Track last bitrate to avoid frequent updates
     private var videoFrameCount: Long = 0 // Counter for debug logging
@@ -264,6 +266,8 @@ class StreamingService : Service() {
             whipSink = null
             srtSink?.close()
             srtSink = null
+            ristSink?.close()
+            ristSink = null
 
             // Clean up queue
             networkExecutor?.shutdown()
@@ -361,8 +365,11 @@ class StreamingService : Service() {
         // WHIP (WebRTC) requires Opus, SRT prefers AAC for MPEG-TS compatibility
         val whipEnabled = outputConfigs.any { it.enabled && (it.url.startsWith("whip://") || it.url.startsWith("https://") || it.url.startsWith("http://")) }
         val srtEnabled = outputConfigs.any { it.enabled && it.url.startsWith("srt://") }
-        useOpusAudio = whipEnabled || !srtEnabled  // Opus if WHIP enabled or no sinks configured
-        Log.i("StreamingService", "Audio codec: ${if (useOpusAudio) "Opus" else "AAC"} (WHIP=$whipEnabled, SRT=$srtEnabled)")
+        val ristEnabled = outputConfigs.any { it.enabled && it.url.startsWith("rist://") }
+        // Opus if WHIP enabled or no MPEG-TS sinks configured. SRT and RIST both
+        // ship MPEG-TS and prefer AAC.
+        useOpusAudio = whipEnabled || !(srtEnabled || ristEnabled)
+        Log.i("StreamingService", "Audio codec: ${if (useOpusAudio) "Opus" else "AAC"} (WHIP=$whipEnabled, SRT=$srtEnabled, RIST=$ristEnabled)")
 
         // Read video codec setting
         val videoCodec = runBlocking { settings?.codec?.first() } ?: SupportedVideoCodec.H264
@@ -476,6 +483,18 @@ class StreamingService : Service() {
                         return
                     }
                 }
+                config.url.startsWith("rist://") -> {
+                    Log.i("StreamingService", "Creating RIST sink for ${config.url}")
+                    try {
+                        ristSink = RISTSink(config.url, mimeTypes)
+                    } catch (e: Exception) {
+                        Log.e("StreamingService", "Failed to create RIST sink: ${e.message}", e)
+                        Handler(Looper.getMainLooper()).post {
+                            Toast.makeText(this@StreamingService, "RIST connection failed: ${e.message}", Toast.LENGTH_LONG).show()
+                        }
+                        return
+                    }
+                }
                 config.url.startsWith("whip://") || config.url.startsWith("https://") || config.url.startsWith("http://") -> {
                     // WHIP sink - strip whip:// prefix and extract token from query params
                     val rawUrl = if (config.url.startsWith("whip://")) config.url.removePrefix("whip://") else config.url
@@ -557,6 +576,9 @@ class StreamingService : Service() {
 
                             // Write to SRT sink if configured
                             srtSink?.writeSample(0, array, ts, flags)
+
+                            // Write to RIST sink if configured
+                            ristSink?.writeSample(0, array, ts, flags)
 
                             // Get SRT bandwidth estimate (in bps)
                             val srtBandwidth = srtSink?.getEstimatedBandwidth() ?: 0L
@@ -723,12 +745,14 @@ class StreamingService : Service() {
                         networkExecutor?.execute {
                             try {
                                 if (useOpusAudio) {
-                                    // Opus mode - write to WHIP (WebRTC) and SRT (if configured)
+                                    // Opus mode - write to WHIP (WebRTC) and SRT/RIST (if configured)
                                     whipSink?.writeOpus(array, pts)
                                     srtSink?.writeSample(1, array, pts, flags)
+                                    ristSink?.writeSample(1, array, pts, flags)
                                 } else {
-                                    // AAC mode - only SRT supports AAC in MPEG-TS
+                                    // AAC mode - SRT/RIST both carry AAC in MPEG-TS
                                     srtSink?.writeSample(1, array, pts, flags)
+                                    ristSink?.writeSample(1, array, pts, flags)
                                 }
                             } catch (e: Exception) {
                                 Log.e("StreamingService", "Error writing audio data: ${e.message}", e)
@@ -1224,6 +1248,8 @@ class StreamingService : Service() {
         whipSink = null
         srtSink?.close()
         srtSink = null
+        ristSink?.close()
+        ristSink = null
 
         networkExecutor?.shutdown()
         networkExecutor = null

@@ -100,6 +100,7 @@ fun SettingsScreen(
                     when {
                         outputConfiguration.url.startsWith("whip://") -> navigateTo("settings/output/whip/edit/$index")
                         outputConfiguration.url.startsWith("srt://") -> navigateTo("settings/output/srt/edit/$index")
+                        outputConfiguration.url.startsWith("rist://") -> navigateTo("settings/output/rist/edit/$index")
                         outputConfiguration.url.startsWith("rtmp://") -> navigateTo("settings/output/rtmp/edit/$index")
                         outputConfiguration.url.startsWith("rtsp://") -> navigateTo("settings/output/rtsp/edit/$index")
                         outputConfiguration.url.startsWith("file://") -> navigateTo("settings/output/disk/edit/$index")

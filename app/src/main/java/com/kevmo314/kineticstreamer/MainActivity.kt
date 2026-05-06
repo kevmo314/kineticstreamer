@@ -188,6 +188,18 @@ class MainActivity : ComponentActivity() {
                             navigateBack = { navController.popBackStack("settings", false) }
                         )
                     }
+                    composable("settings/output/rist") {
+                        AddRistOutputScreen(
+                            onSave = { config ->
+                                kotlinx.coroutines.runBlocking {
+                                    val configs = settings.outputConfigurations.first().toMutableList()
+                                    configs.add(config)
+                                    settings.setOutputConfigurations(configs)
+                                }
+                            },
+                            navigateBack = { navController.popBackStack("settings", false) }
+                        )
+                    }
                     composable("settings/output/rtsp") {
                         AddRtspOutputScreen(
                             onSave = { config ->
@@ -274,6 +286,38 @@ class MainActivity : ComponentActivity() {
                             initialHost = host,
                             initialPort = port,
                             initialStreamId = streamId
+                        )
+                    }
+                    composable("settings/output/rist/edit/{index}") { backStackEntry ->
+                        val index = backStackEntry.arguments?.getString("index")?.toIntOrNull() ?: return@composable
+                        val configs = kotlinx.coroutines.runBlocking { settings.outputConfigurations.first() }
+                        if (index >= configs.size) return@composable
+                        val config = configs[index]
+                        // Parse rist://host:port?cname=foo
+                        val uri = android.net.Uri.parse(config.url)
+                        val host = uri.host ?: ""
+                        val port = uri.port.takeIf { it > 0 }?.toString() ?: "1968"
+                        val cname = uri.getQueryParameter("cname") ?: ""
+
+                        AddRistOutputScreen(
+                            onSave = { newConfig ->
+                                kotlinx.coroutines.runBlocking {
+                                    val currentConfigs = settings.outputConfigurations.first().toMutableList()
+                                    currentConfigs[index] = newConfig
+                                    settings.setOutputConfigurations(currentConfigs)
+                                }
+                            },
+                            onDelete = {
+                                kotlinx.coroutines.runBlocking {
+                                    val currentConfigs = settings.outputConfigurations.first().toMutableList()
+                                    currentConfigs.removeAt(index)
+                                    settings.setOutputConfigurations(currentConfigs)
+                                }
+                            },
+                            navigateBack = { navController.popBackStack("settings", false) },
+                            initialHost = host,
+                            initialPort = port,
+                            initialCname = cname
                         )
                     }
                 }
