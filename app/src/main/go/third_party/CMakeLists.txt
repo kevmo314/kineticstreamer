@@ -9,10 +9,8 @@ set(PAGE_SIZE_LINKER_FLAGS "-Wl,-z,max-page-size=16384")
 
 # Host tag for NDK prebuilt toolchains (linux-x86_64, darwin-x86_64, windows-x86_64).
 # OPENSSL_PATH_ENV pins the PATH for the OpenSSL Configure/make pipeline so the
-# build is reproducible. On Windows we skip this — Windows PATH uses ';' which
-# is also CMake's list separator, and the runner's default PATH already has
-# Git Bash + perl + make. OpenSSL's Configure resolves the cross-compiler from
-# ANDROID_NDK_ROOT, so we don't need the NDK bin on PATH for the compile step.
+# build is reproducible. Windows uses ';' as PATH separator, so libopenssl uses
+# ExternalProject's LIST_SEPARATOR to keep PATH as one cmake -E env argument.
 if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
     set(NDK_HOST_TAG "linux-x86_64")
     set(OPENSSL_PATH_ENV "PATH=${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin:/usr/bin:/bin")
@@ -23,26 +21,36 @@ elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
     set(OPENSSL_CONFIGURE ./Configure)
 elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
     set(NDK_HOST_TAG "windows-x86_64")
-    set(OPENSSL_SHIM_DIR "${CMAKE_BINARY_DIR}/openssl-toolchain-shims")
-    file(MAKE_DIRECTORY "${OPENSSL_SHIM_DIR}")
-    foreach(_prefix IN ITEMS aarch64-linux-android armv7a-linux-androideabi i686-linux-android x86_64-linux-android)
-        file(WRITE "${OPENSSL_SHIM_DIR}/${_prefix}-gcc.cmd" "@echo off\r\n\"${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin/${_prefix}${ANDROID_API}-clang.cmd\" %*\r\n")
-        file(WRITE "${OPENSSL_SHIM_DIR}/${_prefix}-g++.cmd" "@echo off\r\n\"${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin/${_prefix}${ANDROID_API}-clang++.cmd\" %*\r\n")
-        file(WRITE "${OPENSSL_SHIM_DIR}/${_prefix}-ar.cmd" "@echo off\r\n\"${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin/llvm-ar.exe\" %*\r\n")
-        file(WRITE "${OPENSSL_SHIM_DIR}/${_prefix}-ranlib.cmd" "@echo off\r\n\"${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin/llvm-ranlib.exe\" %*\r\n")
-    endforeach()
     string(REPLACE ";" "|" _HOST_PATH "$ENV{PATH}")
-    set(OPENSSL_PATH_ENV "PATH=${OPENSSL_SHIM_DIR}|${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin|${_HOST_PATH}")
-    # cmd.exe doesn't honour unix shebangs, so invoke the perl script explicitly.
-    # Prefer a full Perl distribution when CI provides one; Git Bash's Perl can
-    # be missing modules required by OpenSSL's Configure script.
     if (DEFINED ENV{OPENSSL_PERL})
+        get_filename_component(OPENSSL_PERL_DIR "$ENV{OPENSSL_PERL}" DIRECTORY)
+        string(SUBSTRING "${ANDROID_NDK}" 0 1 _OPENSSL_NDK_DRIVE)
+        string(SUBSTRING "${ANDROID_NDK}" 2 -1 _OPENSSL_NDK_PATH)
+        string(TOLOWER "${_OPENSSL_NDK_DRIVE}" _OPENSSL_NDK_DRIVE)
+        string(REPLACE "\\" "/" _OPENSSL_NDK_PATH "${_OPENSSL_NDK_PATH}")
+        set(OPENSSL_ANDROID_NDK_ROOT "/${_OPENSSL_NDK_DRIVE}${_OPENSSL_NDK_PATH}")
+        set(OPENSSL_PATH_ENV "PATH=${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin|${OPENSSL_PERL_DIR}|${_HOST_PATH}")
+        set(OPENSSL_PERL_ENV "PERL=$ENV{OPENSSL_PERL}")
         set(OPENSSL_CONFIGURE "$ENV{OPENSSL_PERL}" Configure)
     else()
+        set(OPENSSL_ANDROID_NDK_ROOT "${ANDROID_NDK}")
+        set(OPENSSL_PATH_ENV "PATH=${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin|${_HOST_PATH}")
+        set(OPENSSL_PERL_ENV "")
         set(OPENSSL_CONFIGURE perl Configure)
     endif()
+    # cmd.exe doesn't honour unix shebangs, so invoke the perl script explicitly.
 else()
     message(FATAL_ERROR "Unsupported host system: ${CMAKE_HOST_SYSTEM_NAME}")
+endif()
+
+if (NOT DEFINED OPENSSL_PATCH_COMMAND)
+    set(OPENSSL_PATCH_COMMAND "")
+endif()
+if (NOT DEFINED OPENSSL_PERL_ENV)
+    set(OPENSSL_PERL_ENV "")
+endif()
+if (NOT DEFINED OPENSSL_ANDROID_NDK_ROOT)
+    set(OPENSSL_ANDROID_NDK_ROOT "${ANDROID_NDK}")
 endif()
 
 set(ANDROID_CMAKE_ARGS
@@ -103,10 +111,11 @@ ExternalProject_Add(libopenssl
         GIT_SHALLOW 1
         GIT_SUBMODULES ""  # disable git submodules
         LIST_SEPARATOR |
+        PATCH_COMMAND ${OPENSSL_PATCH_COMMAND}
         BUILD_IN_SOURCE 1
-        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} ${OPENSSL_PATH_ENV} "CC=${OPENSSL_CC}" "CXX=${OPENSSL_CXX}" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" ${OPENSSL_CONFIGURE} ${SSL_TARGET} -D__ANDROID_API__=${ANDROID_API} --prefix=${CMAKE_INSTALL_PREFIX} --openssldir=${CMAKE_INSTALL_PREFIX}
-        BUILD_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} ${OPENSSL_PATH_ENV} "CC=${OPENSSL_CC}" "CXX=${OPENSSL_CXX}" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" make -j -Wno-macro-redefined  # openssl is horrendously noisy
-        INSTALL_COMMAND make install
+        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${OPENSSL_ANDROID_NDK_ROOT} ${OPENSSL_PERL_ENV} ${OPENSSL_PATH_ENV} "CC=${OPENSSL_CC}" "CXX=${OPENSSL_CXX}" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" ${OPENSSL_CONFIGURE} ${SSL_TARGET} -D__ANDROID_API__=${ANDROID_API} --prefix=${CMAKE_INSTALL_PREFIX} --openssldir=${CMAKE_INSTALL_PREFIX}
+        BUILD_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${OPENSSL_ANDROID_NDK_ROOT} ${OPENSSL_PERL_ENV} ${OPENSSL_PATH_ENV} "CC=${OPENSSL_CC}" "CXX=${OPENSSL_CXX}" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" make -j -Wno-macro-redefined  # openssl is horrendously noisy
+        INSTALL_COMMAND ${CMAKE_COMMAND} -E env ${OPENSSL_PERL_ENV} ${OPENSSL_PATH_ENV} make install
 )
 
 ExternalProject_Add(libsrt
@@ -138,17 +147,23 @@ ExternalProject_Add(libsrt
 # install` from ExternalProject.
 set(MESON_NDK_BIN "${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin")
 set(MESON_CROSS_FILE "${CMAKE_CURRENT_BINARY_DIR}/meson-android-${ANDROID_ABI}.txt")
+set(MESON_INSTALL_PREFIX "${CMAKE_INSTALL_PREFIX}")
+set(MESON_INSTALL_COMMAND meson install -C <BINARY_DIR>)
 if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
-    set(_NDK_EXT ".cmd")
+    set(_NDK_CLANG_EXT ".cmd")
+    set(_NDK_LLVM_EXT ".exe")
+    set(MESON_INSTALL_PREFIX "/")
+    set(MESON_INSTALL_COMMAND ${CMAKE_COMMAND} -E env "DESTDIR=${CMAKE_INSTALL_PREFIX}" meson install -C <BINARY_DIR>)
 else()
-    set(_NDK_EXT "")
+    set(_NDK_CLANG_EXT "")
+    set(_NDK_LLVM_EXT "")
 endif()
 file(WRITE "${MESON_CROSS_FILE}"
 "[binaries]
-c = '${MESON_NDK_BIN}/${MESON_TRIPLE}${ANDROID_API}-clang${_NDK_EXT}'
-cpp = '${MESON_NDK_BIN}/${MESON_TRIPLE}${ANDROID_API}-clang++${_NDK_EXT}'
-ar = '${MESON_NDK_BIN}/llvm-ar${_NDK_EXT}'
-strip = '${MESON_NDK_BIN}/llvm-strip${_NDK_EXT}'
+c = '${MESON_NDK_BIN}/${MESON_TRIPLE}${ANDROID_API}-clang${_NDK_CLANG_EXT}'
+cpp = '${MESON_NDK_BIN}/${MESON_TRIPLE}${ANDROID_API}-clang++${_NDK_CLANG_EXT}'
+ar = '${MESON_NDK_BIN}/llvm-ar${_NDK_LLVM_EXT}'
+strip = '${MESON_NDK_BIN}/llvm-strip${_NDK_LLVM_EXT}'
 
 [built-in options]
 c_link_args = ['${PAGE_SIZE_LINKER_FLAGS}']
@@ -165,7 +180,7 @@ ExternalProject_Add(librist
         GIT_REPOSITORY "https://code.videolan.org/rist/librist.git"
         GIT_TAG "v0.2.14"
         GIT_SHALLOW 1
-        CONFIGURE_COMMAND meson setup --cross-file=${MESON_CROSS_FILE} --prefix=${CMAKE_INSTALL_PREFIX} --libdir=lib --buildtype=release --default-library=shared -Dbuilt_tools=false -Dtest=false -Duse_mbedtls=true -Dbuiltin_mbedtls=true --reconfigure <BINARY_DIR> <SOURCE_DIR>
+        CONFIGURE_COMMAND meson setup --cross-file=${MESON_CROSS_FILE} --prefix=${MESON_INSTALL_PREFIX} --libdir=lib --buildtype=release --default-library=shared -Dbuilt_tools=false -Dtest=false -Duse_mbedtls=true -Dbuiltin_mbedtls=true --reconfigure <BINARY_DIR> <SOURCE_DIR>
         BUILD_COMMAND meson compile -C <BINARY_DIR>
-        INSTALL_COMMAND meson install -C <BINARY_DIR>
+        INSTALL_COMMAND ${MESON_INSTALL_COMMAND}
 )

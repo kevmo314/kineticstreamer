@@ -45,7 +45,7 @@ jobs:
 
       - name: Install build tools (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build meson
 
       # macos-latest is Apple Silicon and the NDK r27 toolchain is darwin-x86_64.
       # Install Rosetta 2 so the cross-compiler binaries can execute.
@@ -53,17 +53,23 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           softwareupdate --install-rosetta --agree-to-license || true
-          brew install cmake ninja
+          brew install cmake ninja meson
 
-      # Windows OpenSSL build runs through bash + GNU make. Git Bash is
-      # preinstalled, but its Perl can be missing core modules OpenSSL expects.
+      - name: Set up MSYS2 Perl (Windows)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          install: perl
+
+      # Windows OpenSSL build runs through bash + GNU make. OpenSSL needs a
+      # Unix-style Perl with the standard modules Git Bash's Perl omits.
       - name: Install build tools (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install -y --no-progress make ninja strawberryperl
-          "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
-          "OPENSSL_PERL=C:/Strawberry/perl/bin/perl.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+          choco install -y --no-progress make ninja meson
+          "C:\Program Files\Meson" | Out-File -FilePath $env:GITHUB_PATH -Append
+          "OPENSSL_PERL=C:/msys64/usr/bin/perl.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Cache third-party C deps
         uses: actions/cache@v4
