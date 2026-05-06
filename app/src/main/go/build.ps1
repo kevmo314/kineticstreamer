@@ -69,7 +69,10 @@ Write-Host ""
 # ---- stage 1: third-party C deps (delegated to bash) ----------------------
 function Test-DepsBuilt {
     foreach ($a in $ABIS) {
-        foreach ($lib in @("libusb-1.0.so","libsrt.so","libcrypto.so","libssl.so","librist.so")) {
+        foreach ($lib in @("libusb-1.0.so","libsrt.so","librist.so")) {
+            if (-not (Test-Path (Join-Path $THIRD_PARTY_DIR "$($a.ABI)\lib\$lib"))) { return $false }
+        }
+        foreach ($lib in @("libcrypto.a","libssl.a")) {
             if (-not (Test-Path (Join-Path $THIRD_PARTY_DIR "$($a.ABI)\lib\$lib"))) { return $false }
         }
     }
@@ -144,7 +147,7 @@ $buildJob = {
     $tpForward = ($thirdPartyDir -replace '\\','/') + "/$($arch.ABI)"
     $incForward = $includeDir -replace '\\','/'
     $env:CGO_CFLAGS  = "-I$incForward -I$tpForward/include -D__ANDROID__"
-    $env:CGO_LDFLAGS = "-L$tpForward/lib -lusb-1.0 -lsrt -lcrypto -lssl -lrist -static-libstdc++"
+    $env:CGO_LDFLAGS = "-L$tpForward/lib -lusb-1.0 -lsrt -lssl -lcrypto -lrist -ldl -static-libstdc++"
 
     $archOut = Join-Path $jniLibsDir $arch.ABI
     if (-not (Test-Path $archOut)) { New-Item -ItemType Directory -Path $archOut -Force | Out-Null }
@@ -156,8 +159,12 @@ $buildJob = {
         . 2>&1
     if ($LASTEXITCODE -ne 0) { throw "go build failed for $($arch.ABI)" }
 
-    foreach ($lib in @("libusb-1.0.so","libsrt.so","libcrypto.so","libssl.so","librist.so")) {
+    foreach ($lib in @("libusb-1.0.so","libsrt.so","librist.so")) {
         Copy-Item (Join-Path $thirdPartyDir "$($arch.ABI)\lib\$lib") $archOut -Force
+    }
+    foreach ($lib in @("libcrypto.so","libssl.so")) {
+        $path = Join-Path $thirdPartyDir "$($arch.ABI)\lib\$lib"
+        if (Test-Path $path) { Copy-Item $path $archOut -Force }
     }
     return @{Success=$true; ABI=$arch.ABI}
 }
