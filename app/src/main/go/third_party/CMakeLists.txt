@@ -90,15 +90,26 @@ file(WRITE "${config_file}" "${content}")
 ]=])
     set(OPENSSL_PATCH_COMMAND ${CMAKE_COMMAND} "-DOPENSSL_SOURCE_DIR=<SOURCE_DIR>" -P "${OPENSSL_PATCH_SCRIPT}")
     string(REPLACE ";" "|" _HOST_PATH "$ENV{PATH}")
-    set(OPENSSL_PATH_ENV "PATH=${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin|${_HOST_PATH}")
+    if (DEFINED ENV{OPENSSL_PERL})
+        get_filename_component(OPENSSL_PERL_DIR "$ENV{OPENSSL_PERL}" DIRECTORY)
+        set(OPENSSL_PATH_ENV "PATH=${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin|${OPENSSL_PERL_DIR}|${_HOST_PATH}")
+        set(OPENSSL_PERL_ENV "PERL=$ENV{OPENSSL_PERL}")
+        set(OPENSSL_CONFIGURE "$ENV{OPENSSL_PERL}" Configure)
+    else()
+        set(OPENSSL_PATH_ENV "PATH=${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin|${_HOST_PATH}")
+        set(OPENSSL_PERL_ENV "")
+        set(OPENSSL_CONFIGURE perl Configure)
+    endif()
     # cmd.exe doesn't honour unix shebangs, so invoke the perl script explicitly.
-    set(OPENSSL_CONFIGURE perl Configure)
 else()
     message(FATAL_ERROR "Unsupported host system: ${CMAKE_HOST_SYSTEM_NAME}")
 endif()
 
 if (NOT DEFINED OPENSSL_PATCH_COMMAND)
     set(OPENSSL_PATCH_COMMAND "")
+endif()
+if (NOT DEFINED OPENSSL_PERL_ENV)
+    set(OPENSSL_PERL_ENV "")
 endif()
 
 set(ANDROID_CMAKE_ARGS
@@ -161,9 +172,9 @@ ExternalProject_Add(libopenssl
         LIST_SEPARATOR |
         PATCH_COMMAND ${OPENSSL_PATCH_COMMAND}
         BUILD_IN_SOURCE 1
-        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} ${OPENSSL_PATH_ENV} "CC=${OPENSSL_CC}" "CXX=${OPENSSL_CXX}" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" ${OPENSSL_CONFIGURE} ${SSL_TARGET} -D__ANDROID_API__=${ANDROID_API} --prefix=${CMAKE_INSTALL_PREFIX} --openssldir=${CMAKE_INSTALL_PREFIX}
-        BUILD_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} ${OPENSSL_PATH_ENV} "CC=${OPENSSL_CC}" "CXX=${OPENSSL_CXX}" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" make -j -Wno-macro-redefined  # openssl is horrendously noisy
-        INSTALL_COMMAND ${CMAKE_COMMAND} -E env ${OPENSSL_PATH_ENV} make install
+        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} ${OPENSSL_PERL_ENV} ${OPENSSL_PATH_ENV} "CC=${OPENSSL_CC}" "CXX=${OPENSSL_CXX}" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" ${OPENSSL_CONFIGURE} ${SSL_TARGET} -D__ANDROID_API__=${ANDROID_API} --prefix=${CMAKE_INSTALL_PREFIX} --openssldir=${CMAKE_INSTALL_PREFIX}
+        BUILD_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} ${OPENSSL_PERL_ENV} ${OPENSSL_PATH_ENV} "CC=${OPENSSL_CC}" "CXX=${OPENSSL_CXX}" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" make -j -Wno-macro-redefined  # openssl is horrendously noisy
+        INSTALL_COMMAND ${CMAKE_COMMAND} -E env ${OPENSSL_PERL_ENV} ${OPENSSL_PATH_ENV} make install
 )
 
 ExternalProject_Add(libsrt
