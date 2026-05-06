@@ -145,8 +145,10 @@ ExternalProject_Add(libsrt
 # install` from ExternalProject.
 set(MESON_NDK_BIN "${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin")
 set(MESON_CROSS_FILE "${CMAKE_CURRENT_BINARY_DIR}/meson-android-${ANDROID_ABI}.txt")
+set(MESON_INSTALL_PREFIX "${CMAKE_INSTALL_PREFIX}")
 if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
     set(_NDK_EXT ".cmd")
+    file(TO_NATIVE_PATH "${CMAKE_INSTALL_PREFIX}" MESON_INSTALL_PREFIX)
 else()
     set(_NDK_EXT "")
 endif()
@@ -172,7 +174,7 @@ ExternalProject_Add(librist
         GIT_REPOSITORY "https://code.videolan.org/rist/librist.git"
         GIT_TAG "v0.2.14"
         GIT_SHALLOW 1
-        CONFIGURE_COMMAND meson setup --cross-file=${MESON_CROSS_FILE} --prefix=${CMAKE_INSTALL_PREFIX} --libdir=lib --buildtype=release --default-library=shared -Dbuilt_tools=false -Dtest=false -Duse_mbedtls=true -Dbuiltin_mbedtls=true --reconfigure <BINARY_DIR> <SOURCE_DIR>
+        CONFIGURE_COMMAND meson setup --cross-file=${MESON_CROSS_FILE} --prefix=${MESON_INSTALL_PREFIX} --libdir=lib --buildtype=release --default-library=shared -Dbuilt_tools=false -Dtest=false -Duse_mbedtls=true -Dbuiltin_mbedtls=true --reconfigure <BINARY_DIR> <SOURCE_DIR>
         BUILD_COMMAND meson compile -C <BINARY_DIR>
         INSTALL_COMMAND meson install -C <BINARY_DIR>
 )
