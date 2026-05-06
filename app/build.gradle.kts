@@ -17,18 +17,23 @@ tasks.register<Exec>("buildGoLibrary") {
     val isWindows = System.getProperty("os.name").lowercase().contains("windows")
 
     if (isWindows) {
-        // On Windows, use PowerShell directly (no bash)
-        commandLine("powershell", "-ExecutionPolicy", "Bypass", "-File", "./build_native.ps1")
+        commandLine("powershell", "-ExecutionPolicy", "Bypass", "-File", "./build.ps1")
     } else {
-        // Unix-like systems (Linux, macOS)
-        commandLine("bash", "./build_native.sh")
+        commandLine("bash", "./build.sh")
     }
 
     // Set environment variables if needed
-    // Look for NDK in the Android SDK location
-    val androidHome = System.getenv("ANDROID_HOME") ?:
+    // Look for NDK in the Android SDK location, falling back to local.properties / OS defaults
+    val osName = System.getProperty("os.name").lowercase()
+    val isMac = osName.contains("mac") || osName.contains("darwin")
+    val sdkDirFromProps = rootProject.file("local.properties").takeIf { it.exists() }
+        ?.readLines()
+        ?.firstOrNull { it.startsWith("sdk.dir=") }
+        ?.substringAfter("sdk.dir=")
+    val androidHome = System.getenv("ANDROID_HOME") ?: sdkDirFromProps ?:
         if (isWindows) "C:/Users/${System.getProperty("user.name")}/AppData/Local/Android/Sdk"
-        else "/home/kevin/android"
+        else if (isMac) "${System.getProperty("user.home")}/Library/Android/sdk"
+        else "${System.getProperty("user.home")}/Android/Sdk"
 
     // Find the NDK version - prefer 26.x for compatibility
     val ndkDir = file("$androidHome/ndk")
@@ -41,8 +46,7 @@ tasks.register<Exec>("buildGoLibrary") {
 
     val androidNdk = System.getenv("ANDROID_NDK") ?:
         if (ndkVersion != null) "$androidHome/ndk/$ndkVersion"
-        else if (isWindows) "$androidHome/ndk/26.1.10909125"
-        else "/home/kevin/android/ndk/27.0.12077973"
+        else "$androidHome/ndk/26.1.10909125"
 
     environment("ANDROID_NDK", androidNdk)
     environment("ANDROID_HOME", androidHome)

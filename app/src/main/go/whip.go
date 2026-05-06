@@ -40,7 +40,6 @@ type WHIPSink struct {
 	resourceURL     string // WHIP resource URL for DELETE on close
 	closed          bool   // Set to true when intentionally closed
 	frameCount      uint64 // For periodic logging
-	useScream       bool   // Use SCReAM instead of GCC for congestion control
 }
 
 type whipTrack struct {
@@ -53,9 +52,6 @@ type whipTrack struct {
 	ssrc            uint32
 	payloadType     uint8
 }
-
-// UseScream enables SCReAM congestion control instead of GCC (set to true to test SCReAM)
-var UseScream = false
 
 const (
 	// Playout delay RTP header extension URI
@@ -84,13 +80,6 @@ func addPlayoutDelayExtension(pkt *rtp.Packet) {
 
 // WHIPSinkOption configures the WHIP sink
 type WHIPSinkOption func(*WHIPSink)
-
-// WithScream enables SCReAM congestion control instead of GCC
-func WithScream() WHIPSinkOption {
-	return func(s *WHIPSink) {
-		s.useScream = true
-	}
-}
 
 func NewWHIPSink(url, bearerToken, encodedMediaFormatMimeTypes string, opts ...WHIPSinkOption) (*WHIPSink, error) {
 	s := &WHIPSink{
@@ -170,22 +159,14 @@ func (s *WHIPSink) connect() error {
 
 	// Create congestion controller
 	// Initial bitrate: 1 Mbps, Min: 400 Kbps (IVS requires 200+ for TWCC), Max: 7.5 Mbps
-	var congestionController *cc.InterceptorFactory
-	if s.useScream {
-		log.Printf("WHIP: Using SCReAM congestion control")
-		congestionController, err = cc.NewInterceptor(func() (cc.BandwidthEstimator, error) {
-			return NewScreamBWE(ScreamBWEInitialBitrate(1_000_000))
-		})
-	} else {
-		log.Printf("WHIP: Using GCC congestion control")
-		congestionController, err = cc.NewInterceptor(func() (cc.BandwidthEstimator, error) {
-			return gcc.NewSendSideBWE(
-				gcc.SendSideBWEInitialBitrate(1_000_000),
-				gcc.SendSideBWEMinBitrate(400_000),
-				gcc.SendSideBWEMaxBitrate(7_500_000),
-			)
-		})
-	}
+	log.Printf("WHIP: Using GCC congestion control")
+	congestionController, err := cc.NewInterceptor(func() (cc.BandwidthEstimator, error) {
+		return gcc.NewSendSideBWE(
+			gcc.SendSideBWEInitialBitrate(1_000_000),
+			gcc.SendSideBWEMinBitrate(400_000),
+			gcc.SendSideBWEMaxBitrate(7_500_000),
+		)
+	})
 	if err != nil {
 		return err
 	}
@@ -584,31 +565,19 @@ func (s *WHIPSink) WriteH264(buf []byte, ptsMicroseconds int64) (int, error) {
 	if s.estimator != nil {
 		stats := s.estimator.GetStats()
 
-		// Check if using SCReAM or GCC
-		if ccType, ok := stats["type"].(string); ok && ccType == "scream" {
-			// SCReAM: use GetTargetBitrate directly
-			targetBitrate = s.estimator.GetTargetBitrate()
-
-			// Log SCReAM stats every 30 frames (~1s at 30fps)
-			s.frameCount++
-			if s.frameCount%30 == 0 {
-				log.Printf("SCReAM stats: target=%d kbps", targetBitrate/1000)
-			}
+		// GCC: Use delay-based estimate only (ignore loss-based which IVS corrupts)
+		// IVS reports fake 60%+ packet loss at low bitrates, breaking loss-based estimation
+		if delayBitrate, ok := stats["delayTargetBitrate"].(int); ok && delayBitrate > 0 {
+			targetBitrate = delayBitrate
 		} else {
-			// GCC: Use delay-based estimate only (ignore loss-based which IVS corrupts)
-			// IVS reports fake 60%+ packet loss at low bitrates, breaking loss-based estimation
-			if delayBitrate, ok := stats["delayTargetBitrate"].(int); ok && delayBitrate > 0 {
-				targetBitrate = delayBitrate
-			} else {
-				targetBitrate = s.estimator.GetTargetBitrate()
-			}
+			targetBitrate = s.estimator.GetTargetBitrate()
+		}
 
-			// Log GCC stats every 30 frames (~1s at 30fps)
-			s.frameCount++
-			if s.frameCount%30 == 0 {
-				log.Printf("GCC stats: delay=%d kbps, loss=%v, using=%d kbps",
-					stats["delayTargetBitrate"], stats["lossTargetBitrate"], targetBitrate/1000)
-			}
+		// Log GCC stats every 30 frames (~1s at 30fps)
+		s.frameCount++
+		if s.frameCount%30 == 0 {
+			log.Printf("GCC stats: delay=%d kbps, loss=%v, using=%d kbps",
+				stats["delayTargetBitrate"], stats["lossTargetBitrate"], targetBitrate/1000)
 		}
 
 		// Floor at 400 kbps (336 kbps video + 64 kbps audio)

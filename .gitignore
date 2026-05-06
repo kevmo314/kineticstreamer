@@ -15,6 +15,7 @@
 local.properties
 
 # Go library dependencies and third-party code
-**/third_party/
+**/third_party/*
+!**/third_party/CMakeLists.txt
 app/src/main/libs/
 app/src/main/jniLibs/

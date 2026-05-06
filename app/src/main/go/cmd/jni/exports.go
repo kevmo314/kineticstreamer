@@ -283,14 +283,9 @@ func GoCreateWHIPSink(urlStr, tokenStr, mimeTypesStr *C.char) (handle int64) {
 	token := C.GoString(tokenStr)
 	mimeTypes := C.GoString(mimeTypesStr)
 
-	log.Printf("WHIP: creating sink url=%s mimeTypes=%s useScream=%v", url, mimeTypes, kinetic.UseScream)
+	log.Printf("WHIP: creating sink url=%s mimeTypes=%s", url, mimeTypes)
 
-	var opts []kinetic.WHIPSinkOption
-	if kinetic.UseScream {
-		opts = append(opts, kinetic.WithScream())
-	}
-
-	sink, err := kinetic.NewWHIPSink(url, token, mimeTypes, opts...)
+	sink, err := kinetic.NewWHIPSink(url, token, mimeTypes)
 	if err != nil {
 		log.Printf("WHIP: failed to create sink: %v", err)
 		return 0

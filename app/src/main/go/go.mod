@@ -6,8 +6,7 @@ require (
 	github.com/bluenviron/gortsplib/v4 v4.6.2
 	github.com/bluenviron/mediacommon v1.9.2
 	github.com/google/uuid v1.6.0
-	github.com/kevmo314/go-uvc v0.0.0-20260121051837-2d0096283528
-	github.com/mengelbart/scream-go v0.5.0
+	github.com/kevmo314/go-uvc v0.0.0-20260201233718-a8678bfc12e6
 	github.com/pion/interceptor v0.1.42
 	github.com/pion/rtcp v1.2.16
 	github.com/pion/rtp v1.8.27
@@ -45,7 +44,3 @@ require (
 )
 
 replace github.com/bluenviron/mediacommon v1.14.0 => github.com/kevmo314/mediacommon v0.0.0-20240430015613-61465b2e6a80
-
-replace github.com/mengelbart/scream-go => ./third_party/scream-go
-
-replace github.com/kevmo314/go-uvc => ./third_party/go-uvc
