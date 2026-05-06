@@ -25,7 +25,13 @@ elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
     set(NDK_HOST_TAG "windows-x86_64")
     set(OPENSSL_PATH_ENV "")
     # cmd.exe doesn't honour unix shebangs, so invoke the perl script explicitly.
-    set(OPENSSL_CONFIGURE perl Configure)
+    # Prefer a full Perl distribution when CI provides one; Git Bash's Perl can
+    # be missing modules required by OpenSSL's Configure script.
+    if (DEFINED ENV{OPENSSL_PERL})
+        set(OPENSSL_CONFIGURE "$ENV{OPENSSL_PERL}" Configure)
+    else()
+        set(OPENSSL_CONFIGURE perl Configure)
+    endif()
 else()
     message(FATAL_ERROR "Unsupported host system: ${CMAKE_HOST_SYSTEM_NAME}")
 endif()
