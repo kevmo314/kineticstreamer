@@ -62,6 +62,7 @@ jobs:
         shell: pwsh
         run: |
           choco install -y --no-progress make ninja strawberryperl meson
+          "C:\Program Files\Meson" | Out-File -FilePath $env:GITHUB_PATH -Append
           "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
           "OPENSSL_PERL=C:/Strawberry/perl/bin/perl.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
 
