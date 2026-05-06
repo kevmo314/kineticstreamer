@@ -60,15 +60,22 @@ ExternalProject_Add(libusb
 
 if (ANDROID_ABI STREQUAL "armeabi-v7a")
     set(SSL_TARGET "android-arm")
+    set(OPENSSL_CC_PREFIX "armv7a-linux-androideabi")
 elseif (ANDROID_ABI STREQUAL "arm64-v8a")
     set(SSL_TARGET "android-arm64")
+    set(OPENSSL_CC_PREFIX "aarch64-linux-android")
 elseif (ANDROID_ABI STREQUAL "x86")
     set(SSL_TARGET "android-x86")
+    set(OPENSSL_CC_PREFIX "i686-linux-android")
 elseif (ANDROID_ABI STREQUAL "x86_64")
     set(SSL_TARGET "android-x86_64")
+    set(OPENSSL_CC_PREFIX "x86_64-linux-android")
 else()
     message(FATAL_ERROR "Unsupported ANDROID_ABI: ${ANDROID_ABI}")
 endif()
+
+set(OPENSSL_CC "${OPENSSL_CC_PREFIX}${ANDROID_API}-clang")
+set(OPENSSL_CXX "${OPENSSL_CC_PREFIX}${ANDROID_API}-clang++")
 
 ExternalProject_Add(libopenssl
         GIT_REPOSITORY "https://github.com/openssl/openssl.git"
@@ -77,8 +84,8 @@ ExternalProject_Add(libopenssl
         GIT_SUBMODULES ""  # disable git submodules
         LIST_SEPARATOR |
         BUILD_IN_SOURCE 1
-        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} ${OPENSSL_PATH_ENV} "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" ${OPENSSL_CONFIGURE} ${SSL_TARGET} -D__ANDROID_API__=${ANDROID_API} --prefix=${CMAKE_INSTALL_PREFIX} --openssldir=${CMAKE_INSTALL_PREFIX}
-        BUILD_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} ${OPENSSL_PATH_ENV} "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" make -j -Wno-macro-redefined  # openssl is horrendously noisy
+        CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} ${OPENSSL_PATH_ENV} "CC=${OPENSSL_CC}" "CXX=${OPENSSL_CXX}" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" ${OPENSSL_CONFIGURE} ${SSL_TARGET} -D__ANDROID_API__=${ANDROID_API} --prefix=${CMAKE_INSTALL_PREFIX} --openssldir=${CMAKE_INSTALL_PREFIX}
+        BUILD_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${ANDROID_NDK} ${OPENSSL_PATH_ENV} "CC=${OPENSSL_CC}" "CXX=${OPENSSL_CXX}" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" make -j -Wno-macro-redefined  # openssl is horrendously noisy
         INSTALL_COMMAND make install
 )
 
