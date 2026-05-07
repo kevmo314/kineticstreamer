@@ -44,8 +44,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import com.google.accompanist.permissions.ExperimentalPermissionsApi
-import com.google.accompanist.permissions.rememberMultiplePermissionsState
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -60,21 +58,22 @@ val REQUIRED_PERMISSIONS =
             add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
         }
     }
-@ExperimentalPermissionsApi
 @Composable
 fun MainScreen(
     settings: Settings,
     streamingService: IStreamingService?,
+    requiredPermissionsGranted: Boolean,
+    requestRequiredPermissions: () -> Unit,
     navigateToSettings: () -> Unit) {
-    val permissionsState = rememberMultiplePermissionsState(REQUIRED_PERMISSIONS)
-
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = Color.Black
     ) {
-        if (!permissionsState.allPermissionsGranted) {
-            LaunchedEffect(Unit) {
-                permissionsState.launchMultiplePermissionRequest()
+        if (!requiredPermissionsGranted) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Button(onClick = requestRequiredPermissions) {
+                    Text("Grant camera and microphone access")
+                }
             }
         } else {
             val cameraSelectorDialogOpen = remember { mutableStateOf(false) }

@@ -149,6 +149,9 @@ class SurfaceTextureRenderer {
     @Volatile
     private var rotate180 = false
 
+    @Volatile
+    private var applyTextureTransform = true
+
     // Stream start time for wall-clock timestamp synchronization with audio
     @Volatile
     var streamStartTimeNanos: Long = 0
@@ -463,6 +466,11 @@ class SurfaceTextureRenderer {
         Log.i(TAG, "180° rotation ${if (enabled) "enabled" else "disabled"}")
     }
 
+    fun setApplyTextureTransform(enabled: Boolean) {
+        applyTextureTransform = enabled
+        Log.i(TAG, "Texture transform ${if (enabled) "enabled" else "disabled"}")
+    }
+
     // Precalculated padding offset for rotation (calculated from integer pixel values)
     private var paddingOffset: Float = 0f
 
@@ -520,7 +528,11 @@ class SurfaceTextureRenderer {
         // Update textures outside of synchronized block
         // Update main video texture on texture unit 0
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
-        surfaceTexture.getTransformMatrix(textureMatrix)
+        if (applyTextureTransform) {
+            surfaceTexture.getTransformMatrix(textureMatrix)
+        } else {
+            Matrix.setIdentityM(textureMatrix, 0)
+        }
 
         // Log transform matrix periodically for debugging
         if (System.currentTimeMillis() % 5000 < 50) {

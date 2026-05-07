@@ -20,12 +20,13 @@ import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.mutableStateOf
+import androidx.core.content.ContextCompat
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.kevmo314.kineticstreamer.ui.theme.KineticStreamerTheme
 import kotlinx.coroutines.flow.first
 
@@ -58,10 +59,30 @@ fun UsbDevice.isUac(): Boolean {
 
 class MainActivity : ComponentActivity() {
     private val streamingService = mutableStateOf<IStreamingService?>(null)
+    private val requiredPermissionsGranted = mutableStateOf(false)
     private var serviceConnection: ServiceConnection? = null
+    private var serviceBound = false
+
+    private val permissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { grants ->
+        val allGranted = REQUIRED_PERMISSIONS.all { grants[it] == true || hasPermission(it) }
+        requiredPermissionsGranted.value = allGranted
+        if (allGranted) {
+            bindStreamingService()
+        } else {
+            streamingService.value = null
+            Log.w("KineticStreamer", "Required permissions denied; streaming service not started")
+        }
+    }
 
     override fun onResume() {
         super.onResume()
+
+        requiredPermissionsGranted.value = hasRequiredPermissions()
+        if (requiredPermissionsGranted.value) {
+            bindStreamingService()
+        }
 
         if (intent != null && intent.action.equals(UsbManager.ACTION_USB_DEVICE_ATTACHED)) {
             val pendingIntent = PendingIntent.getBroadcast(
@@ -78,7 +99,6 @@ class MainActivity : ComponentActivity() {
     }
 
     @ExperimentalMaterial3Api
-    @ExperimentalPermissionsApi
     override fun onCreate(savedInstanceState: Bundle?) {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         enableEdgeToEdge()
@@ -97,13 +117,12 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        bindService(
-            Intent(this, StreamingService::class.java).apply {
-                action = IStreamingService::class.java.name
-            },
-            serviceConnection!!,
-            Context.BIND_AUTO_CREATE
-        )
+        requiredPermissionsGranted.value = hasRequiredPermissions()
+        if (requiredPermissionsGranted.value) {
+            bindStreamingService()
+        } else {
+            permissionLauncher.launch(REQUIRED_PERMISSIONS.toTypedArray())
+        }
 
         // Debug orientation info
         val display = windowManager.defaultDisplay
@@ -126,6 +145,10 @@ class MainActivity : ComponentActivity() {
                         MainScreen(
                             settings = settings,
                             streamingService = streamingService.value,
+                            requiredPermissionsGranted = requiredPermissionsGranted.value,
+                            requestRequiredPermissions = {
+                                permissionLauncher.launch(REQUIRED_PERMISSIONS.toTypedArray())
+                            },
                             navigateToSettings = {
                                 navController.navigate("settings")
                             })
@@ -326,7 +349,31 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        serviceConnection?.let { unbindService(it) }
+        if (serviceBound) {
+            serviceConnection?.let { unbindService(it) }
+            serviceBound = false
+        }
         super.onDestroy()
     }
+
+    private fun bindStreamingService() {
+        if (serviceBound || serviceConnection == null) {
+            return
+        }
+
+        bindService(
+            Intent(this, StreamingService::class.java).apply {
+                action = IStreamingService::class.java.name
+            },
+            serviceConnection!!,
+            Context.BIND_AUTO_CREATE
+        )
+        serviceBound = true
+    }
+
+    private fun hasRequiredPermissions(): Boolean =
+        REQUIRED_PERMISSIONS.all { hasPermission(it) }
+
+    private fun hasPermission(permission: String): Boolean =
+        ContextCompat.checkSelfPermission(this, permission) == android.content.pm.PackageManager.PERMISSION_GRANTED
 }
