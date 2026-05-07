@@ -53,7 +53,9 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           softwareupdate --install-rosetta --agree-to-license || true
-          brew install cmake ninja meson
+          for formula in cmake ninja meson; do
+            brew list --formula "$formula" >/dev/null 2>&1 || brew install "$formula"
+          done
 
       - name: Set up MSYS2 OpenSSL tools (Windows)
         if: runner.os == 'Windows'
