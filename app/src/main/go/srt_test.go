@@ -24,8 +24,12 @@ func TestSRTSink_RoundTrip(t *testing.T) {
 	}
 	recvCh := make(chan recvResult, 1)
 	go func() {
-		// Drain at least 8 packets so we can verify multiple sync bytes.
-		got, err := listener.AcceptAndDrain(188 * 8)
+		// Drain everything the sink sends. Cap is generous (1 MiB) — the
+		// listener actually exits when sink.Close causes recv to return 0
+		// rather than when this cap is hit. If we cap too low the sink's
+		// next srt_send fails after the listener closes its socket, and
+		// SRTSink's auto-reconnect logic kicks in and stalls the test.
+		got, err := listener.AcceptAndDrain(1 << 20)
 		recvCh <- recvResult{bytes: got, err: err}
 	}()
 
@@ -49,17 +53,20 @@ func TestSRTSink_RoundTrip(t *testing.T) {
 		0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x00, 0x33,
 	}
 
-	// Send a few frames so the muxer emits PAT/PMT plus a couple of PES
-	// packets and the listener can verify multiple TS sync bytes.
-	for i := 0; i < 5; i++ {
+	// Send keyframes spaced out so the listener has time to schedule between
+	// the SRT handshake completing and the connection being torn down. Slow
+	// CI runners (macos-latest in particular) need this — a tight loop has
+	// been observed to land all sends before accept() returns.
+	for i := 0; i < 10; i++ {
 		pts := int64(i) * 33_000 // ~30fps
 		if err := sink.WriteSample(0, annexB, pts, int32(MediaCodecBufferFlagKeyFrame)); err != nil {
 			t.Fatalf("WriteSample[%d]: %v", i, err)
 		}
+		time.Sleep(30 * time.Millisecond)
 	}
 
 	// Give SRT time to flush the live queue before we tear it down.
-	time.Sleep(250 * time.Millisecond)
+	time.Sleep(500 * time.Millisecond)
 	if err := sink.Close(); err != nil {
 		t.Fatalf("sink.Close: %v", err)
 	}
