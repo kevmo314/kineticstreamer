@@ -13,19 +13,27 @@ set -eo pipefail
 
 # ---- arg parsing -----------------------------------------------------------
 REBUILD_DEPS=0
+DEPS_ONLY=0
+SKIP_DEPS=0
 for arg in "$@"; do
     case "$arg" in
         --rebuild-deps) REBUILD_DEPS=1 ;;
+        --deps-only) DEPS_ONLY=1 ;;
+        --skip-deps) SKIP_DEPS=1 ;;
         -h|--help)
             sed -n '2,9p' "$0" | sed 's/^# \?//'
             echo
-            echo "Usage: $0 [--rebuild-deps]"
+            echo "Usage: $0 [--rebuild-deps] [--deps-only|--skip-deps]"
             exit 0
             ;;
         *) echo "Unknown arg: $arg"; exit 1 ;;
     esac
 done
 
+if [ "$DEPS_ONLY" -eq 1 ] && [ "$SKIP_DEPS" -eq 1 ]; then
+    echo "--deps-only and --skip-deps cannot be used together"
+    exit 1
+fi
 
 # ---- shared environment ----------------------------------------------------
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
@@ -116,7 +124,12 @@ deps_built() {
     return 0
 }
 
-if [ "$REBUILD_DEPS" -eq 1 ] || ! deps_built; then
+if [ "$SKIP_DEPS" -eq 1 ] && ! deps_built; then
+    echo "Third-party dependencies are missing. Run without --skip-deps or build them first."
+    exit 1
+fi
+
+if [ "$SKIP_DEPS" -eq 0 ] && { [ "$REBUILD_DEPS" -eq 1 ] || ! deps_built; }; then
     cd "$SCRIPT_DIR"
     # Build sequentially. Parallel builds combined with OpenSSL's 'make -j'
     # (no job limit) fork-bomb the host.
@@ -126,6 +139,11 @@ if [ "$REBUILD_DEPS" -eq 1 ] || ! deps_built; then
     done
     rm -rf third_party/build
     echo
+fi
+
+if [ "$DEPS_ONLY" -eq 1 ]; then
+    echo "Third-party dependencies built to: $THIRD_PARTY_DIR"
+    exit 0
 fi
 
 # ---- stage 2: Go shared library --------------------------------------------

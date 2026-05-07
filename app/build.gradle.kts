@@ -7,24 +7,43 @@ plugins {
     id("kotlin-parcelize")
 }
 
-// Task to build the Go library with native JNI
-tasks.register<Exec>("buildGoLibrary") {
-    group = "build"
-    description = "Build the Go kinetic library with native JNI"
-    workingDir = file("src/main/go")
+val nativeAbis = listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+val goSourceDir = layout.projectDirectory.dir("src/main/go")
+val thirdPartyOutputDir = goSourceDir.dir("third_party/output")
+val jniLibsDir = layout.projectDirectory.dir("src/main/jniLibs")
+val sharedThirdPartyLibs = listOf("libusb-1.0.so", "libsrt.so", "librist.so")
+val isWindowsHost = System.getProperty("os.name").lowercase().contains("windows")
 
-    // Detect OS and use appropriate command
-    val isWindows = System.getProperty("os.name").lowercase().contains("windows")
+fun thirdPartyLibraries() = nativeAbis.flatMap { abi ->
+    val libDir = thirdPartyOutputDir.dir("$abi/lib")
+    val opensslLibExtension = if (isWindowsHost) "a" else "so"
+    sharedThirdPartyLibs.map { libDir.file(it) } + listOf(
+        libDir.file("libssl.$opensslLibExtension"),
+        libDir.file("libcrypto.$opensslLibExtension"),
+    )
+}
 
-    if (isWindows) {
-        commandLine("powershell", "-ExecutionPolicy", "Bypass", "-File", "./build.ps1")
-    } else {
-        commandLine("bash", "./build.sh")
-    }
+fun jniLibraries() = nativeAbis.flatMap { abi ->
+    val libDir = jniLibsDir.dir(abi)
+    val requiredLibs = listOf(
+        libDir.file("libkinetic.so"),
+        libDir.file("libusb-1.0.so"),
+        libDir.file("libsrt.so"),
+        libDir.file("librist.so"),
+    )
+    if (isWindowsHost) requiredLibs else requiredLibs + listOf(
+        libDir.file("libssl.so"),
+        libDir.file("libcrypto.so"),
+    )
+}
+
+fun Exec.configureNativeBuildEnvironment() {
+    workingDir = goSourceDir.asFile
 
     // Set environment variables if needed
     // Look for NDK in the Android SDK location, falling back to local.properties / OS defaults
     val osName = System.getProperty("os.name").lowercase()
+    val isWindows = osName.contains("windows")
     val isMac = osName.contains("mac") || osName.contains("darwin")
     val sdkDirFromProps = rootProject.file("local.properties").takeIf { it.exists() }
         ?.readLines()
@@ -50,6 +69,55 @@ tasks.register<Exec>("buildGoLibrary") {
 
     environment("ANDROID_NDK", androidNdk)
     environment("ANDROID_HOME", androidHome)
+}
+
+val buildThirdPartyDeps = tasks.register<Exec>("buildThirdPartyDeps") {
+    group = "build"
+    description = "Build third-party native dependencies used by the Go JNI library"
+
+    configureNativeBuildEnvironment()
+
+    if (isWindowsHost) {
+        commandLine("powershell", "-ExecutionPolicy", "Bypass", "-File", "./build.ps1", "-DepsOnly")
+    } else {
+        commandLine("bash", "./build.sh", "--deps-only")
+    }
+
+    inputs.file(goSourceDir.file("build.sh"))
+    inputs.file(goSourceDir.file("build.ps1"))
+    inputs.file(goSourceDir.file("third_party/CMakeLists.txt"))
+    outputs.files(thirdPartyLibraries())
+    outputs.dirs(nativeAbis.map { abi -> thirdPartyOutputDir.dir("$abi/include") })
+}
+
+// Task to build the Go library with native JNI
+tasks.register<Exec>("buildGoLibrary") {
+    group = "build"
+    description = "Build the Go kinetic library with native JNI"
+    dependsOn(buildThirdPartyDeps)
+
+    configureNativeBuildEnvironment()
+
+    // Detect OS and use appropriate command
+    if (isWindowsHost) {
+        commandLine("powershell", "-ExecutionPolicy", "Bypass", "-File", "./build.ps1", "-SkipDeps")
+    } else {
+        commandLine("bash", "./build.sh", "--skip-deps")
+    }
+
+    inputs.files(fileTree(goSourceDir) {
+        include("**/*.go")
+        include("**/*.c")
+        include("**/*.h")
+        include("go.mod")
+        include("go.sum")
+        exclude("include/**")
+        exclude("third_party/**")
+    })
+    inputs.files(thirdPartyLibraries())
+    inputs.file(goSourceDir.file("build.sh"))
+    inputs.file(goSourceDir.file("build.ps1"))
+    outputs.files(jniLibraries())
 }
 
 // Make preBuild depend on buildGoLibrary

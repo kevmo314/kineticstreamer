@@ -78,7 +78,7 @@ jobs:
         uses: actions/cache@v5.0.5
         with:
           path: app/src/main/go/third_party/output
-          key: third-party-${{ matrix.os }}-${{ hashFiles('app/src/main/go/third_party/CMakeLists.txt', 'app/src/main/go/build.sh', 'app/src/main/go/build.ps1') }}
+          key: third-party-${{ matrix.os }}-ndk-r27c-${{ hashFiles('app/build.gradle.kts', 'app/src/main/go/third_party/CMakeLists.txt', 'app/src/main/go/build.sh', 'app/src/main/go/build.ps1') }}
 
       - name: Build with Gradle
         shell: bash

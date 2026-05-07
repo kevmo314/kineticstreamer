@@ -8,10 +8,17 @@
 #      Outputs to ../jniLibs/<abi>/libkinetic.so plus the third-party .so's alongside.
 
 param(
-    [switch]$RebuildDeps
+    [switch]$RebuildDeps,
+    [switch]$DepsOnly,
+    [switch]$SkipDeps
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($DepsOnly -and $SkipDeps) {
+    Write-Error "-DepsOnly and -SkipDeps cannot be used together"
+    exit 1
+}
 
 # ---- shared environment ----------------------------------------------------
 $SCRIPT_DIR = $PSScriptRoot
@@ -79,7 +86,12 @@ function Test-DepsBuilt {
     return $true
 }
 
-if ($RebuildDeps -or -not (Test-DepsBuilt)) {
+if ($SkipDeps -and -not (Test-DepsBuilt)) {
+    Write-Error "Third-party dependencies are missing. Run without -SkipDeps or build them first."
+    exit 1
+}
+
+if (-not $SkipDeps -and ($RebuildDeps -or -not (Test-DepsBuilt))) {
     $bashCmd = Get-Command bash -ErrorAction SilentlyContinue
     $bash = if ($bashCmd) { $bashCmd.Source } else { $null }
     if (-not $bash) {
@@ -95,12 +107,19 @@ Options:
         exit 1
     }
     Write-Host "Building third-party C dependencies via bash..."
-    $rebuildArg = if ($RebuildDeps) { "--rebuild-deps" } else { "" }
-    & $bash (Join-Path $SCRIPT_DIR "build.sh") $rebuildArg
+    $bashArgs = @()
+    if ($RebuildDeps) { $bashArgs += "--rebuild-deps" }
+    if ($DepsOnly) { $bashArgs += "--deps-only" }
+    & $bash (Join-Path $SCRIPT_DIR "build.sh") @bashArgs
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Third-party build failed"
         exit 1
     }
+}
+
+if ($DepsOnly) {
+    Write-Host "Third-party dependencies built to: $THIRD_PARTY_DIR"
+    exit 0
 }
 
 # ---- stage 2: Go shared library --------------------------------------------
