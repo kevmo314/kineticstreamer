@@ -17,7 +17,13 @@ import kotlin.concurrent.thread
 /**
  * Audio data with capture timestamp for A/V synchronization.
  */
-data class TimestampedAudio(val data: ByteArray, val captureTimeNanos: Long)
+data class TimestampedAudio(
+    val data: ByteArray,
+    val captureTimeNanos: Long,
+    val sampleRate: Int = 48000,
+    val channelCount: Int = 1,
+    val encoding: Int = AudioFormat.ENCODING_PCM_16BIT
+)
 
 /**
  * Creates a Flow of timestamped audio data from the specified audio device.
@@ -41,6 +47,14 @@ fun AudioSource(context: Context, deviceId: Int?): Flow<TimestampedAudio> = call
 
     val deviceName = audioDevice?.productName?.toString() ?: "Default Microphone"
     Log.i("AudioSource", "Setting up audio recording for: $deviceName")
+    if (audioDevice != null) {
+        Log.i(
+            "AudioSource",
+            "Device capabilities: sampleRates=${audioDevice.sampleRates.contentToString()}, " +
+                "channelCounts=${audioDevice.channelCounts.contentToString()}, " +
+                "encodings=${audioDevice.encodings.contentToString()}"
+        )
+    }
 
     // Audio recording parameters
     val sampleRate = 48000
@@ -79,7 +93,14 @@ fun AudioSource(context: Context, deviceId: Int?): Flow<TimestampedAudio> = call
         }
 
         audioRecord.startRecording()
-        Log.i("AudioSource", "Audio recording started for: $deviceName")
+        val actualSampleRate = audioRecord.sampleRate
+        val actualChannelCount = audioRecord.channelCount
+        val actualEncoding = audioRecord.audioFormat
+        Log.i(
+            "AudioSource",
+            "Audio recording started for: $deviceName " +
+                "(sampleRate=$actualSampleRate, channels=$actualChannelCount, encoding=$actualEncoding)"
+        )
 
         // Create recording thread
         val recordThread = thread(name = "AudioRecord-Source") {
@@ -97,7 +118,7 @@ fun AudioSource(context: Context, deviceId: Int?): Flow<TimestampedAudio> = call
                     if (bytesRead > 0) {
                         frameCount++
                         totalBytes += bytesRead
-                        val samplesInThisRead = bytesRead / 2 // 16-bit PCM = 2 bytes per sample
+                        val framesInThisRead = bytesRead / (2 * actualChannelCount.coerceAtLeast(1))
 
                         // Calculate timestamp using AudioRecord.getTimestamp() for hardware-accurate timing
                         val status = audioRecord.getTimestamp(audioTimestamp, AudioTimestamp.TIMEBASE_MONOTONIC)
@@ -105,13 +126,13 @@ fun AudioSource(context: Context, deviceId: Int?): Flow<TimestampedAudio> = call
                             // Calculate timestamp for the START of this buffer
                             // audioTimestamp gives us an anchor: framePosition <-> nanoTime
                             val frameDiff = totalSamplesRead - audioTimestamp.framePosition
-                            audioTimestamp.nanoTime + (frameDiff * 1_000_000_000L / sampleRate)
+                            audioTimestamp.nanoTime + (frameDiff * 1_000_000_000L / actualSampleRate)
                         } else {
                             // Fallback: calculate based on samples read
-                            startRecordingTimeNanos + (totalSamplesRead * 1_000_000_000L / sampleRate)
+                            startRecordingTimeNanos + (totalSamplesRead * 1_000_000_000L / actualSampleRate)
                         }
 
-                        totalSamplesRead += samplesInThisRead
+                        totalSamplesRead += framesInThisRead
 
                         // Log first frame for debugging
                         if (frameCount == 1) {
@@ -123,7 +144,7 @@ fun AudioSource(context: Context, deviceId: Int?): Flow<TimestampedAudio> = call
                         val audioData = buffer.copyOfRange(0, bytesRead)
 
                         // Send timestamped audio data to flow
-                        trySend(TimestampedAudio(audioData, captureTimeNanos))
+                        trySend(TimestampedAudio(audioData, captureTimeNanos, actualSampleRate, actualChannelCount, actualEncoding))
                     } else if (bytesRead < 0) {
                         Log.e("AudioSource", "AudioRecord read error: $bytesRead")
                         break

@@ -61,8 +61,6 @@ import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import kotlin.math.abs
@@ -219,7 +217,16 @@ class StreamingService : Service() {
             Log.i("StreamingService", "Stream started at nanos: $streamStartTimeNanos")
             
             // Setup and start encoders (they'll use the initialized timestamps)
-            setupEncoders()
+            try {
+                setupEncoders()
+            } catch (e: Exception) {
+                Log.e("StreamingService", "Failed to start streaming: ${e.message}", e)
+                Handler(Looper.getMainLooper()).post {
+                    Toast.makeText(this@StreamingService, "Streaming failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+                stopStreaming()
+                return
+            }
             Log.i("StreamingService", "Encoders initialized and started")
 
             // Pass stream start time to renderer for wall-clock timestamp sync
@@ -355,7 +362,7 @@ class StreamingService : Service() {
             return whipSink?.getPeerConnectionState() ?: "none"
         }
     }
-    
+
     private fun setupEncoders() {
         // Read output configurations FIRST to determine audio codec
         val outputConfigs = runBlocking { settings?.outputConfigurations?.first() } ?: emptyList()
@@ -400,18 +407,6 @@ class StreamingService : Service() {
             setInteger(MediaFormat.KEY_LATENCY, 3) // Small lookahead buffer to prevent blocking
             setInteger(MediaFormat.KEY_OPERATING_RATE, 60) // Higher than frame rate for headroom
 
-            // Set profile/level based on codec
-            when (videoCodec) {
-                SupportedVideoCodec.H264 -> {
-                    setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileHigh)
-                    setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel41)
-                }
-                SupportedVideoCodec.H265 -> {
-                    setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.HEVCProfileMain)
-                    setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.HEVCMainTierLevel41)
-                }
-                else -> { /* Use encoder defaults for VP8/VP9/AV1 */ }
-            }
         }
 
         // Create audio format based on selected codec
@@ -448,6 +443,12 @@ class StreamingService : Service() {
                 Log.i("StreamingService", "AAC encoder configured: 192kbps, AAC-LC, stereo")
             }
         }
+
+        val codecList = MediaCodecList(MediaCodecList.REGULAR_CODECS)
+        val videoEncoderName = codecList.findEncoderForFormat(videoMediaFormat)
+            ?: codecList.codecInfos.firstOrNull { codecInfo ->
+                codecInfo.isEncoder && codecInfo.supportedTypes.any { it.equals(videoCodec.mimeType, ignoreCase = true) }
+            }?.name
 
         // Create sinks based on configured outputs
         val mimeTypes = listOf(
@@ -544,9 +545,11 @@ class StreamingService : Service() {
         var frameCount = 0
         var lastFrameTime: Long = 0
 
-        videoEncoder = MediaCodec.createByCodecName(
-            MediaCodecList(MediaCodecList.REGULAR_CODECS).findEncoderForFormat(videoMediaFormat)
-        ).apply {
+        if (videoEncoderName == null) {
+            throw IllegalStateException("No video encoder found for ${videoMediaFormat.getString(MediaFormat.KEY_MIME)}")
+        }
+        Log.i("StreamingService", "Using video encoder: $videoEncoderName")
+        videoEncoder = MediaCodec.createByCodecName(videoEncoderName).apply {
             configure(videoMediaFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
 
             setCallback(object : MediaCodec.Callback() {
@@ -659,9 +662,12 @@ class StreamingService : Service() {
         audioMediaFormat.setInteger(MediaFormat.KEY_CHANNEL_MASK, AudioFormat.CHANNEL_OUT_STEREO)
         audioMediaFormat.setInteger(MediaFormat.KEY_PCM_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
 
-        audioEncoder = MediaCodec.createByCodecName(
-            MediaCodecList(MediaCodecList.REGULAR_CODECS).findEncoderForFormat(audioMediaFormat)
-        ).apply {
+        val audioEncoderName = MediaCodecList(MediaCodecList.REGULAR_CODECS).findEncoderForFormat(audioMediaFormat)
+        if (audioEncoderName == null) {
+            throw IllegalStateException("No audio encoder found for ${audioMediaFormat.getString(MediaFormat.KEY_MIME)}")
+        }
+        Log.i("StreamingService", "Using audio encoder: $audioEncoderName")
+        audioEncoder = MediaCodec.createByCodecName(audioEncoderName).apply {
             configure(audioMediaFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
 
             setCallback(object : MediaCodec.Callback() {
@@ -843,36 +849,56 @@ class StreamingService : Service() {
     private var audioBufferRemainder = ByteArray(0) // Leftover bytes from previous chunk
     private var audioBufferTimestampNanos: Long = 0 // Timestamp for current accumulated buffer
 
-    private fun feedAudioDataToEncoder(audioData: ByteArray, captureTimeNanos: Long) {
-        // Update sample count for next frame (mono samples)
-        val samplesInBuffer = audioData.size / 2 // 16-bit PCM = 2 bytes per sample
-        audioSampleCount += samplesInBuffer
+    private fun feedAudioDataToEncoder(timestampedAudio: TimestampedAudio) {
+        if (timestampedAudio.encoding != AudioFormat.ENCODING_PCM_16BIT) {
+            Log.w("StreamingService", "Dropping unsupported PCM encoding: ${timestampedAudio.encoding}")
+            return
+        }
 
-        // Calculate audio levels for visualizer (use original mono data)
-        calculateAndSendAudioLevels(audioData)
+        val encoderData = preparePcmForEncoder(
+            timestampedAudio.data,
+            timestampedAudio.sampleRate,
+            timestampedAudio.channelCount
+        ) ?: return
+        val framesInBuffer = encoderData.size / 4 // stereo 16-bit PCM
+        audioSampleCount += framesInBuffer
 
-        // Convert mono to stereo for encoder (fixes left-channel-only playback)
-        val stereoData = convertMonoToStereo(audioData)
+        calculateAndSendAudioLevels(encoderData)
 
-        // Add to queue for encoder with raw capture timestamp (non-blocking, drop if queue is full)
-        // Don't normalize - audio and video must use same CLOCK_MONOTONIC time base
-        audioBufferQueue.offer(Pair(stereoData, captureTimeNanos))
+        audioBufferQueue.offer(Pair(encoderData, timestampedAudio.captureTimeNanos))
     }
 
-    /**
-     * Converts mono PCM audio to stereo by duplicating each sample.
-     * This fixes the issue where mono AAC in MPEG-TS plays only in the left channel.
-     */
-    private fun convertMonoToStereo(monoData: ByteArray): ByteArray {
-        val mono = ByteBuffer.wrap(monoData).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
-        val stereo = ByteBuffer.allocate(monoData.size * 2).order(ByteOrder.LITTLE_ENDIAN)
-        val stereoShort = stereo.asShortBuffer()
-        while (mono.hasRemaining()) {
-            val sample = mono.get()
-            stereoShort.put(sample)  // left
-            stereoShort.put(sample)  // right (duplicate)
+    private fun preparePcmForEncoder(audioData: ByteArray, sourceSampleRate: Int, sourceChannelCount: Int): ByteArray? {
+        if (sourceSampleRate != 48000) {
+            Log.w("StreamingService", "Dropping unsupported PCM sample rate: $sourceSampleRate")
+            return null
         }
-        return stereo.array()
+
+        return when (sourceChannelCount) {
+            1 -> duplicateMonoToStereo(audioData)
+            2 -> audioData
+            else -> {
+                Log.w("StreamingService", "Dropping unsupported PCM channel count: $sourceChannelCount")
+                null
+            }
+        }
+    }
+
+    private fun duplicateMonoToStereo(monoData: ByteArray): ByteArray {
+        val stereoData = ByteArray(monoData.size * 2)
+        var monoOffset = 0
+        var stereoOffset = 0
+        while (monoOffset + 1 < monoData.size) {
+            val low = monoData[monoOffset]
+            val high = monoData[monoOffset + 1]
+            stereoData[stereoOffset] = low
+            stereoData[stereoOffset + 1] = high
+            stereoData[stereoOffset + 2] = low
+            stereoData[stereoOffset + 3] = high
+            monoOffset += 2
+            stereoOffset += 4
+        }
+        return stereoData
     }
 
     private fun calculateAndSendAudioLevels(audioData: ByteArray) {
@@ -1111,7 +1137,7 @@ class StreamingService : Service() {
             .onEach { timestampedAudio ->
                 // Only feed to encoder if streaming
                 if (audioEncoder != null) {
-                    feedAudioDataToEncoder(timestampedAudio.data, timestampedAudio.captureTimeNanos)
+                    feedAudioDataToEncoder(timestampedAudio)
                 } else {
                     // Still calculate audio levels for visualizer even when not streaming
                     calculateAndSendAudioLevels(timestampedAudio.data)

@@ -670,7 +670,6 @@ fun VideoSource(context: Context,
 
     when (device) {
         is VideoSourceDevice.UsbCamera -> {
-            renderer?.setApplyTextureTransform(true)
             Log.i("VideoSource", "Opening USB camera: ${device.usbDevice.productName}")
             val (conn, uvcStream, thread, decoder) = openUsbCamera(context, device.usbDevice, outputSurface, renderer)
             activeUsbDeviceConnection = conn
@@ -679,7 +678,6 @@ fun VideoSource(context: Context,
             activeDecoder = decoder
         }
         is VideoSourceDevice.Camera -> {
-            renderer?.setApplyTextureTransform(false)
             val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
             val characteristics = cameraManager.getCameraCharacteristics(device.cameraId)
             val sensorOrientation = characteristics.get(android.hardware.camera2.CameraCharacteristics.SENSOR_ORIENTATION)
@@ -692,7 +690,6 @@ fun VideoSource(context: Context,
             captureSession = result.session
         }
         is VideoSourceDevice.RtmpServer -> {
-            renderer?.setApplyTextureTransform(true)
             Log.i("VideoSource", "Starting RTMP server on port ${device.port}")
             val server = RTMPServer(device.port)
             if (!server.start()) {
