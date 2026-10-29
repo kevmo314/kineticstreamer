@@ -35,13 +35,11 @@ static int rist_sink_write(struct rist_ctx* ctx, const void* buf, size_t len) {
 */
 import "C"
 import (
-	"bufio"
 	"fmt"
 	"log"
 	"net/url"
 	"strings"
 	"sync"
-	"time"
 	"unsafe"
 
 	"github.com/bluenviron/mediacommon/pkg/formats/mpegts"
@@ -95,14 +93,10 @@ type RISTSink struct {
 	ctx     *C.struct_rist_ctx
 	logging *C.struct_rist_logging_settings
 
-	mpw    *mpegts.Writer
-	bw     *bufio.Writer
+	mux    *tsMux
 	tracks []*mpegts.Track
 	closed bool
 }
-
-var ristSinkCount int
-var ristSinkMu sync.Mutex
 
 // NewRISTSink builds a sender for `rist://host:port` (and variants thereof).
 // The URL is forwarded verbatim to librist's parser, so any query parameters
@@ -168,19 +162,13 @@ func NewRISTSink(rawURL, encodedMediaFormatMimeTypes string) (*RISTSink, error) 
 	}
 
 	w := &ristCtxWriter{ctx: ctx, chunkSize: ristMPEGTSChunk}
-	bw := bufio.NewWriterSize(w, ristMPEGTSChunk)
 
 	sink := &RISTSink{
 		ctx:     ctx,
 		logging: logging,
 		tracks:  tracks,
-		bw:      bw,
-		mpw:     mpegts.NewWriter(bw, tracks),
+		mux:     newTSMux(w, ristMPEGTSChunk, tracks),
 	}
-
-	ristSinkMu.Lock()
-	ristSinkCount++
-	ristSinkMu.Unlock()
 
 	log.Printf("RIST: sink created with %d tracks", len(tracks))
 	return sink, nil
@@ -195,7 +183,7 @@ func (s *RISTSink) WriteSample(i int, buf []byte, ptsMicroseconds int64, mediaCo
 	if s.closed {
 		return fmt.Errorf("RIST: sink closed")
 	}
-	if i >= len(s.tracks) {
+	if i < 0 || i >= len(s.tracks) {
 		return fmt.Errorf("RIST: invalid track index %d", i)
 	}
 
@@ -204,28 +192,7 @@ func (s *RISTSink) WriteSample(i int, buf []byte, ptsMicroseconds int64, mediaCo
 		return fmt.Errorf("RIST: track %d has nil codec", i)
 	}
 
-	isKeyframe := MediaCodecBufferFlag(mediaCodecFlags)&MediaCodecBufferFlagKeyFrame != 0
-	pts := int64((time.Duration(ptsMicroseconds) * time.Microsecond).Seconds() * 90000)
-
-	var err error
-	switch t.Codec.(type) {
-	case *mpegts.CodecH264, *mpegts.CodecH265:
-		nalus := splitNALUs(buf)
-		if len(nalus) == 0 {
-			return nil
-		}
-		err = s.mpw.WriteH26x(t, pts, pts, isKeyframe, nalus)
-	case *mpegts.CodecOpus:
-		err = s.mpw.WriteOpus(t, pts, [][]byte{buf})
-	case *mpegts.CodecMPEG4Audio:
-		err = s.mpw.WriteMPEG4Audio(t, pts, [][]byte{buf})
-	default:
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	return s.bw.Flush()
+	return s.mux.writeSample(t, buf, ptsMicroseconds, mediaCodecFlags)
 }
 
 // Close tears down the librist context and frees its logging settings.
@@ -245,9 +212,5 @@ func (s *RISTSink) Close() error {
 		C.rist_logging_settings_free2(&s.logging)
 		s.logging = nil
 	}
-
-	ristSinkMu.Lock()
-	ristSinkCount--
-	ristSinkMu.Unlock()
 	return nil
 }

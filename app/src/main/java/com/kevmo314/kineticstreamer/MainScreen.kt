@@ -56,6 +56,9 @@ val REQUIRED_PERMISSIONS = listOf(
     Manifest.permission.RECORD_AUDIO
 )
 
+// Notifications are requested too, but only camera and mic gate the app.
+val REQUESTED_PERMISSIONS = REQUIRED_PERMISSIONS + Manifest.permission.POST_NOTIFICATIONS
+
 private data class StreamStats(val bitrate: Int, val fps: Float, val ice: String, val peer: String)
 
 @Composable

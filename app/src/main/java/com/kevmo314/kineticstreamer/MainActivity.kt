@@ -113,7 +113,7 @@ class MainActivity : ComponentActivity() {
         if (requiredPermissionsGranted.value) {
             bindStreamingService()
         } else {
-            permissionLauncher.launch(REQUIRED_PERMISSIONS.toTypedArray())
+            permissionLauncher.launch(REQUESTED_PERMISSIONS.toTypedArray())
         }
 
         // Debug orientation info
@@ -139,7 +139,7 @@ class MainActivity : ComponentActivity() {
                             streamingService = streamingService.value,
                             requiredPermissionsGranted = requiredPermissionsGranted.value,
                             requestRequiredPermissions = {
-                                permissionLauncher.launch(REQUIRED_PERMISSIONS.toTypedArray())
+                                permissionLauncher.launch(REQUESTED_PERMISSIONS.toTypedArray())
                             },
                             navigateToSettings = {
                                 navController.navigate("settings")
@@ -183,7 +183,7 @@ class MainActivity : ComponentActivity() {
         if (intent.action != UsbManager.ACTION_USB_DEVICE_ATTACHED) return
         val device = IntentCompat.getParcelableExtra(intent, UsbManager.EXTRA_DEVICE, UsbDevice::class.java) ?: return
         val pendingIntent = PendingIntent.getBroadcast(
-            this, 0, Intent(this, StreamingService.UsbReceiver::class.java).apply {
+            this, 0, Intent(this, StreamingService.UsbPermissionReceiver::class.java).apply {
                 action = StreamingService.UsbReceiver.ACTION_USB_PERMISSION
             },
             PendingIntent.FLAG_MUTABLE
