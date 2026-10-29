@@ -4,11 +4,14 @@ package kinetic
 
 import (
 	"bytes"
-	"encoding/binary"
 	"fmt"
 	"os/exec"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	rtmpmsg "github.com/yutopp/go-rtmp/message"
 )
 
 // TestRTMPServerStartStop tests basic server lifecycle
@@ -86,60 +89,48 @@ func TestRTMPServerWithFFmpeg(t *testing.T) {
 	var firstVideoPTS, lastVideoPTS int64
 	var firstAudioPTS, lastAudioPTS int64
 
-	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
 	go func() {
-		for i := 0; i < 100; i++ {
-			select {
-			case <-done:
-				return
-			default:
-			}
-
-			frame := source.ReadVideoFrame()
-			if frame == nil {
-				break
+		defer wg.Done()
+		for frame := source.ReadVideoFrame(); frame != nil; frame = source.ReadVideoFrame() {
+			if videoFrames == 0 {
+				firstVideoPTS = frame.PTS
 			}
 			videoFrames++
 			totalVideoBytes += len(frame.Data)
-			if firstVideoPTS == 0 {
-				firstVideoPTS = frame.PTS
-			}
 			lastVideoPTS = frame.PTS
 		}
 	}()
-
 	go func() {
-		for i := 0; i < 200; i++ {
-			select {
-			case <-done:
-				return
-			default:
-			}
-
-			frame := source.ReadAudioFrame()
-			if frame == nil {
-				break
+		defer wg.Done()
+		for frame := source.ReadAudioFrame(); frame != nil; frame = source.ReadAudioFrame() {
+			if audioFrames == 0 {
+				firstAudioPTS = frame.PTS
 			}
 			audioFrames++
 			totalAudioBytes += len(frame.Data)
-			if firstAudioPTS == 0 {
-				firstAudioPTS = frame.PTS
-			}
 			lastAudioPTS = frame.PTS
 		}
 	}()
 
-	// Let it run for 2 seconds
+	// Let it run for 2 seconds, then close the source to stop the readers
 	time.Sleep(2 * time.Second)
-	close(done)
-
-	// Give goroutines time to exit
-	time.Sleep(100 * time.Millisecond)
+	source.Close()
+	wg.Wait()
 
 	t.Logf("Received %d video frames (%d bytes)", videoFrames, totalVideoBytes)
 	t.Logf("Received %d audio frames (%d bytes)", audioFrames, totalAudioBytes)
 	t.Logf("Video PTS range: %d - %d us", firstVideoPTS, lastVideoPTS)
 	t.Logf("Audio PTS range: %d - %d us", firstAudioPTS, lastAudioPTS)
+
+	if totalVideoBytes == 0 || totalAudioBytes == 0 {
+		t.Error("Received empty frames")
+	}
+	// The stream is 3 seconds long and timestamps start at ~0.
+	if lastVideoPTS > 10*1000*1000 || lastAudioPTS > 10*1000*1000 {
+		t.Errorf("Implausible PTS: video %d, audio %d", lastVideoPTS, lastAudioPTS)
+	}
 
 	if videoFrames == 0 {
 		t.Logf("ffmpeg stderr: %s", stderr.String())
@@ -175,30 +166,29 @@ func TestAVCConfigParsing(t *testing.T) {
 		0x68, 0xce, // PPS data (simplified)
 	}
 
-	source := &RTMPSource{}
+	source := newRTMPSource(1, 1)
 	handler := &rtmpHandler{source: source}
 	handler.parseAVCConfig(config)
 
-	if len(source.sps) != 4 {
-		t.Errorf("Expected SPS length 4, got %d", len(source.sps))
+	if len(source.sps) != 1 || len(source.pps) != 1 {
+		t.Fatalf("Expected 1 SPS and 1 PPS, got %d and %d", len(source.sps), len(source.pps))
 	}
-	if len(source.pps) != 2 {
-		t.Errorf("Expected PPS length 2, got %d", len(source.pps))
+	if !bytes.Equal(source.sps[0], []byte{0x67, 0x42, 0x00, 0x1f}) {
+		t.Errorf("SPS mismatch: %x", source.sps[0])
 	}
-	if !bytes.Equal(source.sps, []byte{0x67, 0x42, 0x00, 0x1f}) {
-		t.Errorf("SPS mismatch: %x", source.sps)
+	if !bytes.Equal(source.pps[0], []byte{0x68, 0xce}) {
+		t.Errorf("PPS mismatch: %x", source.pps[0])
 	}
-	if !bytes.Equal(source.pps, []byte{0x68, 0xce}) {
-		t.Errorf("PPS mismatch: %x", source.pps)
+	if source.lengthSize != 4 {
+		t.Errorf("Expected length size 4, got %d", source.lengthSize)
 	}
 }
 
 // TestAVCCToAnnexB tests AVCC to Annex B conversion
 func TestAVCCToAnnexB(t *testing.T) {
-	source := &RTMPSource{
-		sps: []byte{0x67, 0x42, 0x00, 0x1f},
-		pps: []byte{0x68, 0xce},
-	}
+	source := newRTMPSource(1, 1)
+	source.sps = [][]byte{{0x67, 0x42, 0x00, 0x1f}}
+	source.pps = [][]byte{{0x68, 0xce}}
 	handler := &rtmpHandler{source: source}
 
 	// Create AVCC data with two NALUs
@@ -221,9 +211,9 @@ func TestAVCCToAnnexB(t *testing.T) {
 	// Should be: startCode + SPS + startCode + PPS + startCode + nalu1 + startCode + nalu2
 	expected := make([]byte, 0)
 	expected = append(expected, startCode...)
-	expected = append(expected, source.sps...)
+	expected = append(expected, source.sps[0]...)
 	expected = append(expected, startCode...)
-	expected = append(expected, source.pps...)
+	expected = append(expected, source.pps[0]...)
 	expected = append(expected, startCode...)
 	expected = append(expected, nalu1...)
 	expected = append(expected, startCode...)
@@ -248,10 +238,7 @@ func TestAVCCToAnnexB(t *testing.T) {
 
 // TestMediaFrameQueue tests frame queue behavior
 func TestMediaFrameQueue(t *testing.T) {
-	source := &RTMPSource{
-		videoQueue: make(chan *MediaFrame, 3),
-		audioQueue: make(chan *MediaFrame, 3),
-	}
+	source := newRTMPSource(3, 3)
 
 	// Test video queue
 	for i := 0; i < 3; i++ {
@@ -288,10 +275,7 @@ func TestMediaFrameQueue(t *testing.T) {
 
 // TestSourceClose tests proper cleanup on close
 func TestSourceClose(t *testing.T) {
-	source := &RTMPSource{
-		videoQueue: make(chan *MediaFrame, 10),
-		audioQueue: make(chan *MediaFrame, 10),
-	}
+	source := newRTMPSource(10, 10)
 
 	// Add some frames
 	source.videoQueue <- &MediaFrame{Data: []byte{1}}
@@ -324,31 +308,6 @@ func TestSourceClose(t *testing.T) {
 	}
 }
 
-// TestAVCCLengthPrefixSizes tests handling of different NALU length prefix sizes
-func TestAVCCLengthPrefixSizes(t *testing.T) {
-	source := &RTMPSource{
-		sps: []byte{0x67},
-		pps: []byte{0x68},
-	}
-	handler := &rtmpHandler{source: source}
-
-	// Standard 4-byte length prefix
-	avcc := make([]byte, 0)
-	nalu := []byte{0x65, 0x88, 0x84, 0x00, 0x11}
-	lenBytes := make([]byte, 4)
-	binary.BigEndian.PutUint32(lenBytes, uint32(len(nalu)))
-	avcc = append(avcc, lenBytes...)
-	avcc = append(avcc, nalu...)
-
-	annexB := handler.avccToAnnexB(avcc, false)
-
-	// Should have start code + nalu
-	expected := append([]byte{0, 0, 0, 1}, nalu...)
-	if !bytes.Equal(annexB, expected) {
-		t.Errorf("AVCC to Annex B failed.\nExpected: %x\nGot:      %x", expected, annexB)
-	}
-}
-
 // TestServerReconnect tests that a new publisher replaces the old one
 func TestServerReconnect(t *testing.T) {
 	server := NewRTMPServer(0)
@@ -358,10 +317,7 @@ func TestServerReconnect(t *testing.T) {
 	defer server.Stop()
 
 	// Simulate first source
-	source1 := &RTMPSource{
-		videoQueue: make(chan *MediaFrame, 10),
-		audioQueue: make(chan *MediaFrame, 10),
-	}
+	source1 := newRTMPSource(10, 10)
 	server.setSource(source1)
 
 	if server.GetSource() != source1 {
@@ -369,10 +325,7 @@ func TestServerReconnect(t *testing.T) {
 	}
 
 	// Simulate second source (should replace first)
-	source2 := &RTMPSource{
-		videoQueue: make(chan *MediaFrame, 10),
-		audioQueue: make(chan *MediaFrame, 10),
-	}
+	source2 := newRTMPSource(10, 10)
 	server.setSource(source2)
 
 	if server.GetSource() != source2 {
@@ -382,5 +335,312 @@ func TestServerReconnect(t *testing.T) {
 	// First source should be closed
 	if !source1.IsClosed() {
 		t.Error("Old source should be closed when new one connects")
+	}
+}
+
+// flvVideo builds an FLV AVC video tag body.
+func flvVideo(key bool, avcPacketType byte, cts int, data []byte) *bytes.Reader {
+	ft := byte(0x27) // inter frame, AVC
+	if key {
+		ft = 0x17
+	}
+	b := []byte{ft, avcPacketType, byte(cts >> 16), byte(cts >> 8), byte(cts)}
+	return bytes.NewReader(append(b, data...))
+}
+
+// flvAAC builds an FLV AAC audio tag body.
+func flvAAC(aacPacketType byte, data []byte) *bytes.Reader {
+	return bytes.NewReader(append([]byte{0xAF, aacPacketType}, data...))
+}
+
+// avcConfig builds an AVCDecoderConfigurationRecord.
+func avcConfig(lengthSize int, sps, pps [][]byte) []byte {
+	c := []byte{0x01, 0x42, 0x00, 0x1f, 0xfc | byte(lengthSize-1), 0xe0 | byte(len(sps))}
+	for _, p := range sps {
+		c = append(c, byte(len(p)>>8), byte(len(p)))
+		c = append(c, p...)
+	}
+	c = append(c, byte(len(pps)))
+	for _, p := range pps {
+		c = append(c, byte(len(p)>>8), byte(len(p)))
+		c = append(c, p...)
+	}
+	return c
+}
+
+// avccNALs prefixes each NAL with a big-endian length of the given size.
+func avccNALs(lengthSize int, nals ...[]byte) []byte {
+	var out []byte
+	for _, n := range nals {
+		for i := lengthSize - 1; i >= 0; i-- {
+			out = append(out, byte(len(n)>>(8*i)))
+		}
+		out = append(out, n...)
+	}
+	return out
+}
+
+func annexB(nals ...[]byte) []byte {
+	var out []byte
+	for _, n := range nals {
+		out = append(append(out, 0, 0, 0, 1), n...)
+	}
+	return out
+}
+
+func newTestHandler() (*rtmpHandler, *RTMPSource) {
+	src := newRTMPSource(8, 8)
+	return &rtmpHandler{source: src}, src
+}
+
+// TestOnVideoOnAudioDecode checks that FLV payloads are decoded exactly once:
+// frames keep their full contents and PTS is timestamp + composition time.
+func TestOnVideoOnAudioDecode(t *testing.T) {
+	h, src := newTestHandler()
+	sps, pps := []byte{0x67, 1}, []byte{0x68, 2}
+
+	h.OnVideo(0, flvVideo(true, 0, 0, avcConfig(4, [][]byte{sps}, [][]byte{pps})))
+	nal := []byte{0x65, 0xaa, 0xbb, 0xcc}
+	h.OnVideo(1000, flvVideo(true, 1, 40, avccNALs(4, nal)))
+
+	f := src.ReadVideoFrame()
+	if f == nil {
+		t.Fatal("no video frame")
+	}
+	if want := annexB(sps, pps, nal); !bytes.Equal(f.Data, want) {
+		t.Errorf("video data = %x, want %x", f.Data, want)
+	}
+	if f.PTS != 1040*1000 {
+		t.Errorf("video PTS = %d, want %d", f.PTS, 1040*1000)
+	}
+
+	h.OnAudio(0, flvAAC(0, []byte{0x12, 0x10})) // sequence header: skipped
+	aac := []byte{1, 2, 3, 4, 5}
+	h.OnAudio(1000, flvAAC(1, aac))
+	a := src.ReadAudioFrame()
+	if a == nil || !bytes.Equal(a.Data, aac) || a.PTS != 1000*1000 {
+		t.Errorf("audio frame = %+v, want data %x PTS %d", a, aac, 1000*1000)
+	}
+	if src.GetVideoPTS() != 1040*1000 || src.GetAudioPTS() != 1000*1000 {
+		t.Errorf("last PTS = %d/%d", src.GetVideoPTS(), src.GetAudioPTS())
+	}
+}
+
+// TestAVCLengthSizesAndMultipleParameterSets runs 1, 2 and 4 byte NAL length
+// prefixes (from the sequence header) through OnVideo with several SPS/PPS.
+func TestAVCLengthSizesAndMultipleParameterSets(t *testing.T) {
+	sps := [][]byte{{0x67, 1}, {0x67, 2, 2}}
+	pps := [][]byte{{0x68, 1}, {0x68, 2}, {0x68, 3, 3}}
+	nal1 := []byte{0x65, 0x88}
+	nal2 := bytes.Repeat([]byte{0x41}, 200) // needs >1 byte of length for sizes 2/4
+
+	for _, size := range []int{1, 2, 4} {
+		t.Run(fmt.Sprintf("%dbyte", size), func(t *testing.T) {
+			h, src := newTestHandler()
+			nals := [][]byte{nal1}
+			if size > 1 {
+				nals = append(nals, nal2)
+			}
+			h.OnVideo(0, flvVideo(true, 0, 0, avcConfig(size, sps, pps)))
+			if src.lengthSize != size || len(src.sps) != 2 || len(src.pps) != 3 {
+				t.Fatalf("config: lengthSize=%d sps=%d pps=%d", src.lengthSize, len(src.sps), len(src.pps))
+			}
+
+			h.OnVideo(0, flvVideo(true, 1, 0, avccNALs(size, nals...)))
+			want := annexB(append(append(append([][]byte{}, sps...), pps...), nals...)...)
+			if f := src.ReadVideoFrame(); f == nil || !bytes.Equal(f.Data, want) {
+				t.Errorf("keyframe = %v, want %x", f, want)
+			}
+
+			h.OnVideo(33, flvVideo(false, 1, 0, avccNALs(size, nals...)))
+			want = annexB(nals...)
+			if f := src.ReadVideoFrame(); f == nil || !bytes.Equal(f.Data, want) {
+				t.Errorf("p-frame = %v, want %x", f, want)
+			}
+		})
+	}
+}
+
+// TestAVCCTruncatedNAL ensures malformed lengths don't panic or emit garbage.
+func TestAVCCTruncatedNAL(t *testing.T) {
+	h, src := newTestHandler()
+	h.OnVideo(0, flvVideo(false, 1, 0, []byte{0, 0, 0, 9, 1, 2})) // claims 9 bytes, has 2
+	h.OnVideo(0, flvVideo(false, 1, 0, nil))
+	// A keyframe with cached parameter sets but no usable NAL is not a frame.
+	h.OnVideo(0, flvVideo(true, 0, 0, avcConfig(4, [][]byte{{0x67}}, [][]byte{{0x68}})))
+	h.OnVideo(0, flvVideo(true, 1, 0, []byte{0, 0, 0, 9, 1, 2}))
+	h.OnVideo(0, flvVideo(true, 1, 0, []byte{0, 0, 0, 0}))
+	if len(src.videoQueue) != 0 {
+		t.Errorf("expected no frames, got %d", len(src.videoQueue))
+	}
+}
+
+// TestTruncatedAVCConfigIgnored: a truncated record must not clobber state.
+func TestTruncatedAVCConfigIgnored(t *testing.T) {
+	h, src := newTestHandler()
+	cfg := avcConfig(2, [][]byte{{0x67, 1, 2, 3}}, [][]byte{{0x68}})
+	h.parseAVCConfig(cfg[:9]) // cut inside the SPS
+	if len(src.sps) != 0 || len(src.pps) != 0 || src.lengthSize != 4 {
+		t.Errorf("truncated config applied: sps=%d pps=%d lengthSize=%d", len(src.sps), len(src.pps), src.lengthSize)
+	}
+	h.parseAVCConfig(cfg)
+	if len(src.sps) != 1 || len(src.pps) != 1 || src.lengthSize != 2 {
+		t.Errorf("full config: sps=%d pps=%d lengthSize=%d", len(src.sps), len(src.pps), src.lengthSize)
+	}
+}
+
+// TestWaitForSourceSkipsStaleSource: only the newest publisher is handed out,
+// and nothing is handed out after Stop.
+func TestWaitForSourceSkipsStaleSource(t *testing.T) {
+	server := NewRTMPServer(0)
+	s1, s2 := newRTMPSource(1, 1), newRTMPSource(1, 1)
+	server.setSource(s1)
+	server.setSource(s2)
+	if got := server.WaitForSource(time.Second); got != s2 {
+		t.Errorf("WaitForSource = %p, want newest %p", got, s2)
+	}
+
+	server.setSource(newRTMPSource(1, 1))
+	server.Stop()
+	if got := server.WaitForSource(time.Second); got != nil {
+		t.Error("WaitForSource should return nil after Stop")
+	}
+}
+
+// TestVideoQueueOverflowDropsUntilKeyframe verifies that after the queue
+// overflows, P-frames are dropped until a keyframe arrives.
+func TestVideoQueueOverflowDropsUntilKeyframe(t *testing.T) {
+	src := newRTMPSource(2, 2)
+	frame := func(id byte) *MediaFrame { return &MediaFrame{Data: []byte{id}, PTS: int64(id)} }
+
+	// Nothing is decodable before the first keyframe.
+	src.pushVideo(frame(0), false)
+	if len(src.videoQueue) != 0 {
+		t.Fatal("P-frame before first keyframe should be dropped")
+	}
+
+	src.pushVideo(frame(1), true)  // K1
+	src.pushVideo(frame(2), false) // P (queue now full)
+	src.pushVideo(frame(3), false) // overflow: dropped
+	if f := src.ReadVideoFrame(); f.Data[0] != 1 {
+		t.Fatalf("got %d, want K1", f.Data[0])
+	}
+	src.pushVideo(frame(4), false) // room available, but a gap precedes it
+	src.pushVideo(frame(5), true)  // K2 resumes
+	src.pushVideo(frame(6), false) // queue full again, dropped
+
+	var got []byte
+	for len(src.videoQueue) > 0 {
+		got = append(got, src.ReadVideoFrame().Data[0])
+	}
+	if !bytes.Equal(got, []byte{2, 5}) {
+		t.Errorf("queued frames = %v, want [2 5]", got)
+	}
+}
+
+// TestConcurrentCloseDuringOnVideoOnAudio is meant for -race: Close must never
+// panic a producer that is mid-send.
+func TestConcurrentCloseDuringOnVideoOnAudio(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		h, src := newTestHandler()
+		var wg sync.WaitGroup
+		stop := make(chan struct{})
+		for j := 0; j < 2; j++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				nal := avccNALs(4, []byte{0x65, 1, 2, 3})
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					h.OnVideo(1, flvVideo(true, 1, 0, nal))
+					h.OnAudio(1, flvAAC(1, []byte{1, 2, 3}))
+					src.GetVideoPTS()
+				}
+			}()
+		}
+		wg.Add(1)
+		go func() { // reader drains until closed
+			defer wg.Done()
+			for src.ReadVideoFrame() != nil {
+			}
+		}()
+		time.Sleep(time.Millisecond)
+		src.Close()
+		src.Close()
+		close(stop)
+		wg.Wait()
+	}
+}
+
+// TestCloseUnblocksReaders checks blocked readers return nil on Close.
+func TestCloseUnblocksReaders(t *testing.T) {
+	src := newRTMPSource(1, 1)
+	var n atomic.Int32
+	var wg sync.WaitGroup
+	for _, read := range []func() *MediaFrame{src.ReadVideoFrame, src.ReadAudioFrame} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if read() == nil {
+				n.Add(1)
+			}
+		}()
+	}
+	time.Sleep(10 * time.Millisecond)
+	src.Close()
+	wg.Wait()
+	if n.Load() != 2 {
+		t.Errorf("%d readers returned nil, want 2", n.Load())
+	}
+}
+
+// TestOnPublishAfterStop: a publisher arriving after Stop must not panic and
+// must not become the active source.
+func TestOnPublishAfterStop(t *testing.T) {
+	server := NewRTMPServer(0)
+	if err := server.Start(); err != nil {
+		t.Fatal(err)
+	}
+	server.Stop()
+	server.Stop() // idempotent
+
+	h := &rtmpHandler{server: server}
+	err := h.OnPublish(nil, 0, &rtmpmsg.NetStreamPublish{PublishingName: "x", PublishingType: "live"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !h.source.IsClosed() {
+		t.Error("late source should be closed")
+	}
+	if server.GetSource() != nil {
+		t.Error("late source should not be active")
+	}
+	// Late frames on the rejected source are ignored.
+	h.OnVideo(0, flvVideo(true, 1, 0, avccNALs(4, []byte{0x65})))
+
+	start := time.Now()
+	if server.WaitForSource(5*time.Second) != nil || time.Since(start) > time.Second {
+		t.Error("WaitForSource should return nil promptly after Stop")
+	}
+}
+
+// TestStopUnblocksWaitForSource checks a waiter is released by Stop.
+func TestStopUnblocksWaitForSource(t *testing.T) {
+	server := NewRTMPServer(0)
+	res := make(chan *RTMPSource)
+	go func() { res <- server.WaitForSource(10 * time.Second) }()
+	time.Sleep(10 * time.Millisecond)
+	server.Stop()
+	select {
+	case s := <-res:
+		if s != nil {
+			t.Error("expected nil source")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WaitForSource not released by Stop")
 	}
 }
