@@ -36,6 +36,9 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4.0.1
+        with:
+          # The default also installs the removed 'tools' package, which now fails.
+          packages: platform-tools
 
       - name: Setup Android NDK
         id: setup-ndk
@@ -58,6 +61,7 @@ jobs:
           done
 
       - name: Set up MSYS2 OpenSSL tools (Windows)
+        id: msys2
         if: runner.os == 'Windows'
         uses: msys2/setup-msys2@v2.31.1
         with:
@@ -72,7 +76,9 @@ jobs:
         run: |
           choco install -y --no-progress ninja meson
           "C:\Program Files\Meson" | Out-File -FilePath $env:GITHUB_PATH -Append
-          "OPENSSL_PERL=C:/msys64/usr/bin/perl.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+          # setup-msys2 installs into the runner temp dir, not C:\msys64.
+          $msys = "${{ steps.msys2.outputs.msys2-location }}".Replace('\', '/')
+          "OPENSSL_PERL=$msys/usr/bin/perl.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Cache third-party C deps
         uses: actions/cache@v5.0.5
