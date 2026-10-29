@@ -40,18 +40,11 @@ fun AudioVisualizerView(
                 }
             }
             displayLevels = resizedLevels
-        }
-    }
-
-    // Decay animation when no audio
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(50) // 20 FPS update
-            if (audioLevels.isEmpty()) {
-                // Gradually decay bars to zero
-                displayLevels = displayLevels.map { level ->
-                    (level * 0.9f).coerceAtLeast(0f)
-                }
+        } else {
+            // Gradually decay bars to zero (20 FPS), then stop.
+            while (displayLevels.any { it > 0.001f }) {
+                delay(50)
+                displayLevels = displayLevels.map { it * 0.9f }
             }
         }
     }

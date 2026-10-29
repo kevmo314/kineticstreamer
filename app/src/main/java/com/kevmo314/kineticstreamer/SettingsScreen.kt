@@ -29,13 +29,13 @@ import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.launch
 
 @ExperimentalMaterial3Api
 @Composable
@@ -63,6 +63,8 @@ fun SettingsScreen(
     navigateBack: () -> Unit,
     navigateTo: (String) -> Unit,
 ) {
+    val scope = rememberCoroutineScope()
+
     Scaffold(
         topBar = {
             CenterAlignedTopAppBar(
@@ -96,26 +98,16 @@ fun SettingsScreen(
 
             for ((index, outputConfiguration) in outputConfigurations.value.withIndex()) {
                 Surface(onClick = {
-                    // Navigate to edit screen based on protocol
-                    when {
-                        outputConfiguration.url.startsWith("whip://") -> navigateTo("settings/output/whip/edit/$index")
-                        outputConfiguration.url.startsWith("srt://") -> navigateTo("settings/output/srt/edit/$index")
-                        outputConfiguration.url.startsWith("rist://") -> navigateTo("settings/output/rist/edit/$index")
-                        outputConfiguration.url.startsWith("rtmp://") -> navigateTo("settings/output/rtmp/edit/$index")
-                        outputConfiguration.url.startsWith("rtsp://") -> navigateTo("settings/output/rtsp/edit/$index")
-                        outputConfiguration.url.startsWith("file://") -> navigateTo("settings/output/disk/edit/$index")
+                    OutputType.fromUrl(outputConfiguration.url)?.let {
+                        navigateTo("settings/output/${it.route}/edit/$index")
                     }
                 }) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Checkbox(checked = outputConfiguration.enabled, onCheckedChange = {
-                            runBlocking {
-                                val updatedConfigurations = outputConfigurations.value.toMutableList()
-                                updatedConfigurations[index] = outputConfiguration.copy(enabled = !outputConfiguration.enabled)
-                                settings.setOutputConfigurations(updatedConfigurations)
-                            }
+                        Checkbox(checked = outputConfiguration.enabled, onCheckedChange = { checked ->
+                            scope.launch { settings.outputs.update(index) { it.copy(enabled = checked) } }
                         })
                         Column {
                             Text(outputConfiguration.protocol)
@@ -144,32 +136,21 @@ fun SettingsScreen(
             val codec = settings.codec.collectAsState(initial = null)
 
             CodecRadioButton(codec.value, SupportedVideoCodec.H264) {
-                runBlocking {
-                    settings.setCodec(SupportedVideoCodec.H264)
-                }
+                scope.launch { settings.setCodec(SupportedVideoCodec.H264) }
             }
             CodecRadioButton(codec.value, SupportedVideoCodec.H265) {
-                runBlocking {
-                    settings.setCodec(SupportedVideoCodec.H265)
-                }
+                scope.launch { settings.setCodec(SupportedVideoCodec.H265) }
             }
             CodecRadioButton(codec.value, SupportedVideoCodec.VP8) {
-                runBlocking {
-                    settings.setCodec(SupportedVideoCodec.VP8)
-                }
+                scope.launch { settings.setCodec(SupportedVideoCodec.VP8) }
             }
             CodecRadioButton(codec.value, SupportedVideoCodec.VP9) {
-                runBlocking {
-                    settings.setCodec(SupportedVideoCodec.VP9)
-                }
+                scope.launch { settings.setCodec(SupportedVideoCodec.VP9) }
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 CodecRadioButton(codec.value, SupportedVideoCodec.AV1) {
-                    runBlocking {
-                        settings.setCodec(SupportedVideoCodec.AV1)
-                    }
-
-                }
+                scope.launch { settings.setCodec(SupportedVideoCodec.AV1) }
+            }
             }
             Surface(onClick = { /*TODO*/ }) {
                 ListItem(
@@ -193,14 +174,14 @@ fun SettingsScreen(
             val autoOpen = settings.autoOpenOnUsbCamera.collectAsState(initial = false)
 
             Surface(onClick = {
-                runBlocking { settings.setAutoOpenOnUsbCamera(!autoOpen.value) }
+                scope.launch { settings.setAutoOpenOnUsbCamera(!autoOpen.value) }
             }) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Checkbox(checked = autoOpen.value, onCheckedChange = {
-                        runBlocking { settings.setAutoOpenOnUsbCamera(it) }
+                        scope.launch { settings.setAutoOpenOnUsbCamera(it) }
                     })
                     Column(modifier = Modifier.padding(start = 8.dp)) {
                         Text("Auto-open on USB camera")
@@ -216,14 +197,14 @@ fun SettingsScreen(
             val rotateVideo = settings.rotateVideo180.collectAsState(initial = false)
 
             Surface(onClick = {
-                runBlocking { settings.setRotateVideo180(!rotateVideo.value) }
+                scope.launch { settings.setRotateVideo180(!rotateVideo.value) }
             }) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Checkbox(checked = rotateVideo.value, onCheckedChange = {
-                        runBlocking { settings.setRotateVideo180(it) }
+                        scope.launch { settings.setRotateVideo180(it) }
                     })
                     Column(modifier = Modifier.padding(start = 8.dp)) {
                         Text("Rotate video 180°")

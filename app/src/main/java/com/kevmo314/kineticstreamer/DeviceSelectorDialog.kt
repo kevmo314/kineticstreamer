@@ -23,6 +23,7 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -40,13 +41,18 @@ fun DeviceSelector(
     onAudioDeviceSelected: (Int?) -> Unit,
 ) {
     val context = LocalContext.current
-    val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-    val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
-    val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-
-    val cameraIds = cameraManager.cameraIdList
-    val usbDevices = usbManager.deviceList.values.filter { it.isUvc() || it.isUac() }
-    val audioDevices = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
+    // Queried once per dialog open rather than on every recomposition.
+    val cameraIds = remember {
+        (context.getSystemService(Context.CAMERA_SERVICE) as CameraManager).cameraIdList
+    }
+    val usbDevices = remember {
+        (context.getSystemService(Context.USB_SERVICE) as UsbManager).deviceList.values
+            .filter { it.isUvc() || it.isUac() }
+    }
+    val audioDevices = remember {
+        (context.getSystemService(Context.AUDIO_SERVICE) as AudioManager)
+            .getDevices(AudioManager.GET_DEVICES_INPUTS)
+    }
 
     val scrollState = rememberScrollState()
 

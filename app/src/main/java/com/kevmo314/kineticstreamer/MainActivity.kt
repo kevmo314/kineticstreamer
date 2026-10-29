@@ -24,11 +24,12 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.mutableStateOf
 import androidx.core.content.ContextCompat
+import androidx.core.content.IntentCompat
+import androidx.lifecycle.lifecycleScope
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.kevmo314.kineticstreamer.ui.theme.KineticStreamerTheme
-import kotlinx.coroutines.flow.first
 
 fun UsbDevice.isUvc(): Boolean {
     for (i in 0 until configurationCount) {
@@ -83,19 +84,6 @@ class MainActivity : ComponentActivity() {
         if (requiredPermissionsGranted.value) {
             bindStreamingService()
         }
-
-        if (intent != null && intent.action.equals(UsbManager.ACTION_USB_DEVICE_ATTACHED)) {
-            val pendingIntent = PendingIntent.getBroadcast(
-                this, 0, Intent(this, StreamingService.UsbPermissionReceiver::class.java).apply {
-                    action = StreamingService.UsbReceiver.ACTION_USB_PERMISSION
-                },
-                PendingIntent.FLAG_MUTABLE
-            )
-            intent.getParcelableExtra<UsbDevice?>(UsbManager.EXTRA_DEVICE).apply {
-                val manager = getSystemService(Context.USB_SERVICE) as UsbManager
-                manager.requestPermission(this, pendingIntent)
-            }
-        }
     }
 
     @ExperimentalMaterial3Api
@@ -105,6 +93,10 @@ class MainActivity : ComponentActivity() {
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
 
         super.onCreate(savedInstanceState)
+
+        if (savedInstanceState == null) {
+            requestUsbPermission(intent)
+        }
 
         // Bind to streaming service at activity level so it persists across navigation
         serviceConnection = object : ServiceConnection {
@@ -121,7 +113,7 @@ class MainActivity : ComponentActivity() {
         if (requiredPermissionsGranted.value) {
             bindStreamingService()
         } else {
-            permissionLauncher.launch(REQUIRED_PERMISSIONS.toTypedArray())
+            permissionLauncher.launch(REQUESTED_PERMISSIONS.toTypedArray())
         }
 
         // Debug orientation info
@@ -147,7 +139,7 @@ class MainActivity : ComponentActivity() {
                             streamingService = streamingService.value,
                             requiredPermissionsGranted = requiredPermissionsGranted.value,
                             requestRequiredPermissions = {
-                                permissionLauncher.launch(REQUIRED_PERMISSIONS.toTypedArray())
+                                permissionLauncher.launch(REQUESTED_PERMISSIONS.toTypedArray())
                             },
                             navigateToSettings = {
                                 navController.navigate("settings")
@@ -175,177 +167,28 @@ class MainActivity : ComponentActivity() {
                             navigateBack = { navController.popBackStack() }
                         )
                     }
-                    composable("settings/output/whip") {
-                        AddWhipOutputScreen(
-                            onSave = { config ->
-                                kotlinx.coroutines.runBlocking {
-                                    val configs = settings.outputConfigurations.first().toMutableList()
-                                    configs.add(config)
-                                    settings.setOutputConfigurations(configs)
-                                }
-                            },
-                            navigateBack = { navController.popBackStack("settings", false) }
-                        )
-                    }
-                    composable("settings/output/srt") {
-                        AddSrtOutputScreen(
-                            onSave = { config ->
-                                kotlinx.coroutines.runBlocking {
-                                    val configs = settings.outputConfigurations.first().toMutableList()
-                                    configs.add(config)
-                                    settings.setOutputConfigurations(configs)
-                                }
-                            },
-                            navigateBack = { navController.popBackStack("settings", false) }
-                        )
-                    }
-                    composable("settings/output/rtmp") {
-                        AddRtmpOutputScreen(
-                            onSave = { config ->
-                                kotlinx.coroutines.runBlocking {
-                                    val configs = settings.outputConfigurations.first().toMutableList()
-                                    configs.add(config)
-                                    settings.setOutputConfigurations(configs)
-                                }
-                            },
-                            navigateBack = { navController.popBackStack("settings", false) }
-                        )
-                    }
-                    composable("settings/output/rist") {
-                        AddRistOutputScreen(
-                            onSave = { config ->
-                                kotlinx.coroutines.runBlocking {
-                                    val configs = settings.outputConfigurations.first().toMutableList()
-                                    configs.add(config)
-                                    settings.setOutputConfigurations(configs)
-                                }
-                            },
-                            navigateBack = { navController.popBackStack("settings", false) }
-                        )
-                    }
-                    composable("settings/output/rtsp") {
-                        AddRtspOutputScreen(
-                            onSave = { config ->
-                                kotlinx.coroutines.runBlocking {
-                                    val configs = settings.outputConfigurations.first().toMutableList()
-                                    configs.add(config)
-                                    settings.setOutputConfigurations(configs)
-                                }
-                            },
-                            navigateBack = { navController.popBackStack("settings", false) }
-                        )
-                    }
-                    composable("settings/output/disk") {
-                        AddDiskOutputScreen(
-                            onSave = { config ->
-                                kotlinx.coroutines.runBlocking {
-                                    val configs = settings.outputConfigurations.first().toMutableList()
-                                    configs.add(config)
-                                    settings.setOutputConfigurations(configs)
-                                }
-                            },
-                            navigateBack = { navController.popBackStack("settings", false) }
-                        )
-                    }
-                    // Edit routes
-                    composable("settings/output/whip/edit/{index}") { backStackEntry ->
-                        val index = backStackEntry.arguments?.getString("index")?.toIntOrNull() ?: return@composable
-                        val configs = kotlinx.coroutines.runBlocking { settings.outputConfigurations.first() }
-                        if (index >= configs.size) return@composable
-                        val config = configs[index]
-                        // Parse whip://url?token=token format
-                        val rawUrl = config.url.removePrefix("whip://")
-                        val uri = android.net.Uri.parse(rawUrl)
-                        val token = uri.getQueryParameter("token") ?: ""
-                        val cleanUrl = uri.buildUpon().clearQuery().build().toString()
-
-                        AddWhipOutputScreen(
-                            onSave = { newConfig ->
-                                kotlinx.coroutines.runBlocking {
-                                    val currentConfigs = settings.outputConfigurations.first().toMutableList()
-                                    currentConfigs[index] = newConfig
-                                    settings.setOutputConfigurations(currentConfigs)
-                                }
-                            },
-                            onDelete = {
-                                kotlinx.coroutines.runBlocking {
-                                    val currentConfigs = settings.outputConfigurations.first().toMutableList()
-                                    currentConfigs.removeAt(index)
-                                    settings.setOutputConfigurations(currentConfigs)
-                                }
-                            },
-                            navigateBack = { navController.popBackStack("settings", false) },
-                            initialUrl = cleanUrl,
-                            initialToken = token
-                        )
-                    }
-                    composable("settings/output/srt/edit/{index}") { backStackEntry ->
-                        val index = backStackEntry.arguments?.getString("index")?.toIntOrNull() ?: return@composable
-                        val configs = kotlinx.coroutines.runBlocking { settings.outputConfigurations.first() }
-                        if (index >= configs.size) return@composable
-                        val config = configs[index]
-                        // Parse srt://host:port?streamid=id format
-                        val uri = android.net.Uri.parse(config.url)
-                        val host = uri.host ?: ""
-                        val port = uri.port.takeIf { it > 0 }?.toString() ?: "9000"
-                        val streamId = uri.getQueryParameter("streamid") ?: ""
-
-                        AddSrtOutputScreen(
-                            onSave = { newConfig ->
-                                kotlinx.coroutines.runBlocking {
-                                    val currentConfigs = settings.outputConfigurations.first().toMutableList()
-                                    currentConfigs[index] = newConfig
-                                    settings.setOutputConfigurations(currentConfigs)
-                                }
-                            },
-                            onDelete = {
-                                kotlinx.coroutines.runBlocking {
-                                    val currentConfigs = settings.outputConfigurations.first().toMutableList()
-                                    currentConfigs.removeAt(index)
-                                    settings.setOutputConfigurations(currentConfigs)
-                                }
-                            },
-                            navigateBack = { navController.popBackStack("settings", false) },
-                            initialHost = host,
-                            initialPort = port,
-                            initialStreamId = streamId
-                        )
-                    }
-                    composable("settings/output/rist/edit/{index}") { backStackEntry ->
-                        val index = backStackEntry.arguments?.getString("index")?.toIntOrNull() ?: return@composable
-                        val configs = kotlinx.coroutines.runBlocking { settings.outputConfigurations.first() }
-                        if (index >= configs.size) return@composable
-                        val config = configs[index]
-                        // Parse rist://host:port?cname=foo
-                        val uri = android.net.Uri.parse(config.url)
-                        val host = uri.host ?: ""
-                        val port = uri.port.takeIf { it > 0 }?.toString() ?: "1968"
-                        val cname = uri.getQueryParameter("cname") ?: ""
-
-                        AddRistOutputScreen(
-                            onSave = { newConfig ->
-                                kotlinx.coroutines.runBlocking {
-                                    val currentConfigs = settings.outputConfigurations.first().toMutableList()
-                                    currentConfigs[index] = newConfig
-                                    settings.setOutputConfigurations(currentConfigs)
-                                }
-                            },
-                            onDelete = {
-                                kotlinx.coroutines.runBlocking {
-                                    val currentConfigs = settings.outputConfigurations.first().toMutableList()
-                                    currentConfigs.removeAt(index)
-                                    settings.setOutputConfigurations(currentConfigs)
-                                }
-                            },
-                            navigateBack = { navController.popBackStack("settings", false) },
-                            initialHost = host,
-                            initialPort = port,
-                            initialCname = cname
-                        )
-                    }
+                    outputRoutes(settings, lifecycleScope) { navController.popBackStack("settings", false) }
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        requestUsbPermission(intent)
+    }
+
+    private fun requestUsbPermission(intent: Intent) {
+        if (intent.action != UsbManager.ACTION_USB_DEVICE_ATTACHED) return
+        val device = IntentCompat.getParcelableExtra(intent, UsbManager.EXTRA_DEVICE, UsbDevice::class.java) ?: return
+        val pendingIntent = PendingIntent.getBroadcast(
+            this, 0, Intent(this, StreamingService.UsbPermissionReceiver::class.java).apply {
+                action = StreamingService.UsbReceiver.ACTION_USB_PERMISSION
+            },
+            PendingIntent.FLAG_MUTABLE
+        )
+        (getSystemService(Context.USB_SERVICE) as UsbManager).requestPermission(device, pendingIntent)
     }
 
     override fun onDestroy() {
