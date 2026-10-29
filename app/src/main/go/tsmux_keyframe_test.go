@@ -44,9 +44,12 @@ func TestTSMux_StartsOnKeyframeWithParameterSets(t *testing.T) {
 	for i, s := range []struct {
 		buf   []byte
 		flags int32
-	}{{paramSets, config}, {deltaFrame, 0}, {idr, key}, {deltaFrame, 0}} {
+	}{{append([]byte(nil), paramSets...), config}, {deltaFrame, 0}, {idr, key}, {deltaFrame, 0}} {
 		if err := m.writeSample(track, s.buf, int64(i)*33_000, s.flags); err != nil {
 			t.Fatal(err)
+		}
+		if i == 0 {
+			clear(s.buf) // the caller reuses its buffer after the call
 		}
 	}
 	got := readVideoAUs(t, w.got.Bytes())

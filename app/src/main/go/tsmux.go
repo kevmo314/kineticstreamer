@@ -64,7 +64,11 @@ func (m *tsMux) writeSample(t *mpegts.Track, buf []byte, ptsMicroseconds int64, 
 			return nil
 		}
 		if isConfig {
-			m.paramSets = nalus
+			// The caller owns buf and may reuse it (JNI), so keep copies.
+			m.paramSets = nil
+			for _, n := range nalus {
+				m.paramSets = append(m.paramSets, append([]byte(nil), n...))
+			}
 			return nil
 		}
 		if isKeyframe {
