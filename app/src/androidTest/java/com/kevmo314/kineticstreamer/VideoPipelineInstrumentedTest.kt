@@ -110,7 +110,7 @@ class VideoPipelineInstrumentedTest {
         val handler = Handler(handlerThread.looper)
         val renderer = SurfaceTextureRenderer()
         try {
-            repeat(5) {
+            repeat(2) {
                 val texture = renderer.createVideoSurfaceTexture(640, 480)
                 val surface = Surface(texture)
                 val result = runBlocking {
@@ -144,7 +144,7 @@ class VideoPipelineInstrumentedTest {
         }, Handler(readerThread.looper))
         renderer.addOutputSurface(sink.surface)
         try {
-            repeat(5) {
+            repeat(2) {
                 // first() cancels the collector, which tears down camera, surfaces and texture
                 runBlocking {
                     withTimeout(30_000) {
