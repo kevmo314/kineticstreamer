@@ -79,7 +79,7 @@ class StreamingService : Service() {
          * Test hook: when set before the service is created, replaces camera and microphone
          * capture (only that step; renderer, encoders and sinks run for real).
          */
-        // FDK AAC-LC (c2.android.aac.encoder) delays its output by 2048 samples at 48 kHz.
+        // The Android software AAC encoder (FDK AAC-LC) delays its output by 2048 samples at 48 kHz.
         private const val AAC_ENCODER_DELAY_US = 2048 * 1_000_000L / 48000
 
         @Volatile
@@ -717,6 +717,8 @@ class StreamingService : Service() {
             throw IllegalStateException("No audio encoder found for ${audioMediaFormat.getString(MediaFormat.KEY_MIME)}")
         }
         Log.i("StreamingService", "Using audio encoder: $audioEncoderName")
+        // Only the software encoder's delay is known; vendor encoders are left uncompensated.
+        val aacDelayKnown = !useOpusAudio && (audioEncoderName.startsWith("c2.android.aac") || audioEncoderName.startsWith("OMX.google.aac"))
         val audioHandlerThread = HandlerThread("StreamingService-Audio").apply {
             priority = Thread.MAX_PRIORITY
             start()
@@ -754,7 +756,7 @@ class StreamingService : Service() {
                         // those of the input it has consumed), so shift it back or sound trails
                         // picture by ~43ms. This also drops the codec-config buffer (timestamp 0)
                         // and the priming frames, which end before the stream starts.
-                        val delayUs = if (useOpusAudio) 0L else AAC_ENCODER_DELAY_US
+                        val delayUs = if (aacDelayKnown) AAC_ENCODER_DELAY_US else 0L
                         val pts = info.presentationTimeUs - (streamStartTimeNanos / 1000) - delayUs
                         if (pts < 0) {
                             codec.releaseOutputBuffer(index, false)

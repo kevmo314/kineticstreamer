@@ -215,6 +215,9 @@ func checkStructure(path string, exp Expectations, r *Report) error {
 		break
 	}
 
+	if n := r.VideoFrames - 1 - lastKeyFrame; haveKey && n > r.MaxKeyFrames {
+		r.MaxKeyFrames = n // the interval still open when the recording ends
+	}
 	if haveSPS {
 		r.Width, r.Height = sps.Width(), sps.Height()
 	}

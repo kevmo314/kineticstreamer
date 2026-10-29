@@ -11,6 +11,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -71,6 +72,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprintln(w, "ok") })
 	srv := &http.Server{Addr: *httpAddr, Handler: mux}
+	stopped := make(chan struct{})
 	mux.HandleFunc("/report", func(w http.ResponseWriter, _ *http.Request) {
 		res := <-done
 		done <- res // later requests get the same answer
@@ -81,13 +83,18 @@ func main() {
 		}
 		w.Write(b)
 		if len(res.Failures) == 0 {
-			go srv.Close()
+			// Let the response finish before exiting; Shutdown waits for this handler.
+			go func() {
+				srv.Shutdown(context.Background())
+				close(stopped)
+			}()
 		}
 	})
 	log.Printf("e2erecv: srt :%d, http %s, out %s", *port, *httpAddr, *out)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
+	<-stopped
 }
 
 func record(paths []string, port int, seg, gap, maxRecovery time.Duration, minFPS float64) *result {
