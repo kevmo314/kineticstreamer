@@ -138,8 +138,11 @@ func TestTSMux_AACConfigFromCodecConfigBuffer(t *testing.T) {
 	if err := m.writeSample(track, []byte{0x12, 0x08}, 0, config); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.writeSample(track, []byte{0xff}, 0, config); err != nil { // truncated: ignored
-		t.Fatal(err)
+	// Truncated, and an explicit 24-bit sample rate that ADTS can't express: both ignored.
+	for _, bad := range [][]byte{{0xff}, {0x17, 0x80, 0x0b, 0xb8, 0x08}} {
+		if err := m.writeSample(track, bad, 0, config); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := m.writeSample(track, []byte{1, 2, 3, 4}, 1000, 0); err != nil {
 		t.Fatal(err)

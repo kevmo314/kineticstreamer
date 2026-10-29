@@ -55,7 +55,7 @@ func (m *tsMux) writeSample(t *mpegts.Track, buf []byte, ptsMicroseconds int64, 
 	pts := ptsTo90k(ptsMicroseconds)
 
 	// MediaCodec's codec-config buffer is not a frame and its timestamp is meaningless (0).
-	// Video keeps it as the parameter sets (below); AAC config is already in the ADTS headers.
+	// Video keeps it as the parameter sets (below); AAC keeps its sample rate and channels (below).
 	isConfig := MediaCodecBufferFlag(mediaCodecFlags)&MediaCodecBufferFlagCodecConfig != 0
 
 	var err error
@@ -92,7 +92,11 @@ func (m *tsMux) writeSample(t *mpegts.Track, buf []byte, ptsMicroseconds int64, 
 			// The AudioSpecificConfig carries the real sample rate and channel
 			// count, which the ADTS headers written below must match.
 			var conf mpeg4audio.Config
-			if err := conf.Unmarshal(buf); err != nil {
+			err := conf.Unmarshal(buf)
+			if err == nil { // ADTS can't express every config, e.g. explicit sample rates
+				_, err = mpeg4audio.ADTSPackets{{Type: conf.Type, SampleRate: conf.SampleRate, ChannelCount: conf.ChannelCount}}.Marshal()
+			}
+			if err != nil {
 				// Not worth tearing the connection down; keep the previous config.
 				log.Printf("TS: ignoring invalid AAC config %x: %v", buf, err)
 				return nil

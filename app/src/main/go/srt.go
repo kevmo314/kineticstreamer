@@ -531,7 +531,9 @@ func (s *SRTSink) WriteSample(i int, buf []byte, ptsMicroseconds int64, mediaCod
 		s.Unlock()
 		return fmt.Errorf("SRT: track %d has nil codec", i)
 	}
-	if s.reconnecting {
+	// Codec-config buffers are sent only once, so they must still reach the
+	// muxer (which just stores them); the reconnect carries them over.
+	if s.reconnecting && MediaCodecBufferFlag(mediaCodecFlags)&MediaCodecBufferFlagCodecConfig == 0 {
 		s.Unlock()
 		return nil
 	}
