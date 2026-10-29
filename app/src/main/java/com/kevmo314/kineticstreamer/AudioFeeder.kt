@@ -1,8 +1,10 @@
 package com.kevmo314.kineticstreamer
 
 import java.nio.ByteBuffer
+import kotlin.math.abs
 
 private const val BYTES_PER_FRAME = 4 // stereo 16-bit PCM
+private const val MAX_JITTER_US = 100_000L
 
 /** Mono 16-bit PCM to interleaved stereo. A trailing odd byte is dropped. */
 fun monoToStereo(mono: ByteArray): ByteArray {
@@ -40,8 +42,9 @@ fun computeAudioLevels(pcm: ByteArray, out: FloatArray) {
  *
  * PTS is the capture time of the first chunk plus the number of frames consumed so far,
  * so every buffer gets a distinct, contiguous timestamp even when a chunk is split across
- * buffers. When a chunk is dropped because the queue is full, the next accepted chunk
- * re-anchors the timeline to its own capture time so A/V sync doesn't drift.
+ * buffers. When a chunk is dropped because the queue is full, or its capture time jumps away
+ * from the end of the previous chunk (source switched), the timeline re-anchors to the new
+ * chunk's capture time so A/V sync doesn't drift.
  */
 class AudioFeeder(private val sampleRate: Int = 48000, private val capacity: Int = 100) {
     private class Chunk(val data: ByteArray, val captureUs: Long, val anchor: Boolean)
@@ -52,6 +55,7 @@ class AudioFeeder(private val sampleRate: Int = 48000, private val capacity: Int
     private var baseUs = 0L
     private var consumedFrames = 0L
     private var anchorNext = true
+    private var expectedNextUs = 0L
 
     @get:Synchronized
     var droppedChunks = 0L
@@ -66,8 +70,12 @@ class AudioFeeder(private val sampleRate: Int = 48000, private val capacity: Int
             anchorNext = true
             return false
         }
-        queue.addLast(Chunk(stereoPcm, captureTimeNanos / 1000, anchorNext))
+        val captureUs = captureTimeNanos / 1000
+        // A capture time far from where the previous chunk ended (source restarted/switched) is a gap.
+        if (abs(captureUs - expectedNextUs) > MAX_JITTER_US) anchorNext = true
+        queue.addLast(Chunk(stereoPcm, captureUs, anchorNext))
         anchorNext = false
+        expectedNextUs = captureUs + stereoPcm.size / BYTES_PER_FRAME * 1_000_000L / sampleRate
         return true
     }
 

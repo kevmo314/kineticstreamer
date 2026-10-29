@@ -83,11 +83,7 @@ sealed class VideoSourceDevice : Parcelable {
 
             // Register receiver
             val filter = IntentFilter(PermissionRequestActivity.ACTION_PERMISSION_RESULT)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
-            } else {
-                context.registerReceiver(receiver, filter)
-            }
+            ContextCompat.registerReceiver(context, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
 
             // Handle cancellation
             continuation.invokeOnCancellation {
@@ -158,11 +154,7 @@ sealed class VideoSourceDevice : Parcelable {
 
             // Register the receiver
             val filter = IntentFilter(action)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
-            } else {
-                context.registerReceiver(receiver, filter)
-            }
+            ContextCompat.registerReceiver(context, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
 
             // Handle cancellation
             continuation.invokeOnCancellation {

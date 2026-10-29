@@ -108,6 +108,19 @@ class AudioFeederTest {
     }
 
     @Test
+    fun captureTimeJumpReanchors() {
+        val feeder = AudioFeeder()
+        feeder.offer(chunk(480), ms(0))
+        feeder.offer(chunk(480), ms(10)) // contiguous, small jitter ignored
+        feeder.offer(chunk(480), ms(5000)) // source restarted
+        val dst = ByteBuffer.allocate(2000 * 4)
+        assertEquals(0L, feeder.fill(dst))
+        assertEquals(960 * 4, dst.position()) // first two merged, third starts a new buffer
+        dst.clear()
+        assertEquals(5_000_000L, feeder.fill(dst))
+    }
+
+    @Test
     fun emptyAndTinyChunksAreIgnored() {
         val feeder = AudioFeeder()
         assertTrue(feeder.offer(ByteArray(0), 0))
