@@ -26,7 +26,7 @@ func get(t *testing.T, sink *HLSSink, path string) (int, http.Header, string) {
 }
 
 func TestHLSSink(t *testing.T) {
-	disk := NewBinaryDumpSink(t.TempDir())
+	disk := NewBinaryDumpSink(t.TempDir(), "video/avc;audio/opus")
 	// two segments of 2 and (assumed) 2 seconds, with several samples each.
 	for _, base := range []int64{1_000_000, 3_000_000} {
 		for i := int64(0); i < 5; i++ {
@@ -96,7 +96,7 @@ func TestHLSSink(t *testing.T) {
 }
 
 func TestHLSSinkListenErrorAndClose(t *testing.T) {
-	disk := NewBinaryDumpSink(t.TempDir())
+	disk := NewBinaryDumpSink(t.TempDir(), "video/avc;audio/opus")
 	sink, err := NewHLSSink(disk, "127.0.0.1:0", "", "audio/opus")
 	if err != nil {
 		t.Fatal(err)
@@ -115,7 +115,7 @@ func TestHLSSinkListenErrorAndClose(t *testing.T) {
 	}
 	l.Close()
 	// missing directory is reported rather than served as an empty playlist.
-	sink, err = NewHLSSink(NewBinaryDumpSink(t.TempDir()+"/missing"), "127.0.0.1:0", "", "audio/opus")
+	sink, err = NewHLSSink(NewBinaryDumpSink(t.TempDir()+"/missing", "video/avc;audio/opus"), "127.0.0.1:0", "", "audio/opus")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestHLSSinkListenErrorAndClose(t *testing.T) {
 }
 
 func TestHLSSinkAAC(t *testing.T) {
-	disk := NewBinaryDumpSink(t.TempDir())
+	disk := NewBinaryDumpSink(t.TempDir(), "video/avc;audio/opus")
 	frame := []byte("aac-frame-payload")
 	for i := int64(0); i < 3; i++ {
 		if err := disk.WriteSample(0, frame, 1_000_000+i*21_333, keyFrame); err != nil {

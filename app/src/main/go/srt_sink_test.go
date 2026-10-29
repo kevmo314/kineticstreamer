@@ -326,3 +326,56 @@ func TestSRTSink_CloseDuringReconnect(t *testing.T) {
 		t.Fatalf("refcount %d, want %d", n, before)
 	}
 }
+
+// A broken connection must not stall the caller: WriteSample drops samples
+// and returns immediately while the reconnect runs in the background. (The
+// first reconnect attempt only starts after a 500ms backoff, so a blocking
+// WriteSample takes at least that long.)
+func TestSRTSink_WriteSampleDoesNotBlockWhileReconnecting(t *testing.T) {
+	l, err := newSRTTestListener()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cch := make(chan *srtTestConn, 1)
+	go func() { c, _ := l.Accept(); cch <- c }()
+	sink, err := NewSRTSink(fmt.Sprintf("srt://127.0.0.1:%d?conntimeo=500", l.Port()), string(MediaFormatMimeTypeVideoH264))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := <-cch
+	drained := make(chan struct{})
+	go func() { c.Drain(); close(drained) }()
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		c.Close()
+		l.Close()
+	}()
+
+	// The listener dies 300ms in; keep writing well past that.
+	var slowest time.Duration
+	done := make(chan error, 1)
+	go func() {
+		for i := 0; i < 300; i++ {
+			start := time.Now()
+			if err := sink.WriteSample(0, testAnnexB, int64(i)*33_000, int32(MediaCodecBufferFlagKeyFrame)); err != nil {
+				done <- err
+				return
+			}
+			slowest = max(slowest, time.Since(start))
+			time.Sleep(10 * time.Millisecond)
+		}
+		done <- nil
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("WriteSample: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("WriteSample stalled while reconnecting")
+	}
+	if slowest > 200*time.Millisecond {
+		t.Errorf("WriteSample blocked for %v while reconnecting", slowest)
+	}
+	sink.Close()
+}

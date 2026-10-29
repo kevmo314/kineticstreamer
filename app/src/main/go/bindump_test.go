@@ -34,7 +34,7 @@ func readAll(t *testing.T, sink *BinaryDumpSink, pts int64) []*BinaryDumpSample 
 }
 
 func TestBinaryDumpRoundTrip(t *testing.T) {
-	sink := NewBinaryDumpSink(t.TempDir())
+	sink := NewBinaryDumpSink(t.TempDir(), "video/avc;audio/opus")
 	// dropped: before the first keyframe.
 	if err := sink.WriteSample(0, []byte("dropped"), 50, 0); err != nil {
 		t.Fatal(err)
@@ -91,7 +91,7 @@ func TestBinaryDumpHeaderLayout(t *testing.T) {
 }
 
 func TestBinaryDumpConcurrentWriters(t *testing.T) {
-	sink := NewBinaryDumpSink(t.TempDir())
+	sink := NewBinaryDumpSink(t.TempDir(), "video/avc;audio/opus")
 	if err := sink.WriteSample(0, []byte("start"), 1, keyFrame); err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestBinaryDumpConcurrentWriters(t *testing.T) {
 
 func TestBinaryDumpTruncatedRecords(t *testing.T) {
 	dir := t.TempDir()
-	sink := NewBinaryDumpSink(dir)
+	sink := NewBinaryDumpSink(dir, "video/avc;audio/opus")
 	sink.WriteSample(0, []byte("aaaa"), 100, keyFrame)
 	sink.WriteSample(0, []byte("bbbb"), 110, 0)
 	sink.WriteSample(0, []byte("cccc"), 200, keyFrame)
@@ -165,7 +165,7 @@ func TestBinaryDumpOversizedRecord(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "100.ucf"), append(header, "xyz"...), 0644); err != nil {
 		t.Fatal(err)
 	}
-	r, err := NewBinaryDumpSink(dir).SampleReader(0)
+	r, err := NewBinaryDumpSink(dir, "video/avc;audio/opus").SampleReader(0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +177,7 @@ func TestBinaryDumpOversizedRecord(t *testing.T) {
 
 func TestBinaryDumpManifestIgnoresStrayFiles(t *testing.T) {
 	dir := t.TempDir()
-	sink := NewBinaryDumpSink(dir)
+	sink := NewBinaryDumpSink(dir, "video/avc;audio/opus")
 	for _, name := range []string{"100.ucf", "20.ucf", "README.txt", "a", ".ucf", "abc.ucf", "3.ucf.tmp", "1"} {
 		if err := os.WriteFile(filepath.Join(dir, name), nil, 0644); err != nil {
 			t.Fatal(err)
@@ -199,14 +199,14 @@ func TestBinaryDumpManifestIgnoresStrayFiles(t *testing.T) {
 }
 
 func TestBinaryDumpEmptyAndMissingDirectory(t *testing.T) {
-	if _, err := NewBinaryDumpSink(t.TempDir()).SampleReader(0); err == nil {
+	if _, err := NewBinaryDumpSink(t.TempDir(), "video/avc;audio/opus").SampleReader(0); err == nil {
 		t.Error("expected error for empty directory")
 	}
-	if _, err := NewBinaryDumpSink(filepath.Join(t.TempDir(), "missing")).ReadManifest(); err == nil {
+	if _, err := NewBinaryDumpSink(filepath.Join(t.TempDir(), "missing"), "video/avc").ReadManifest(); err == nil {
 		t.Error("expected error for missing directory")
 	}
 	// the directory is created on the first keyframe.
-	sink := NewBinaryDumpSink(filepath.Join(t.TempDir(), "a", "b"))
+	sink := NewBinaryDumpSink(filepath.Join(t.TempDir(), "a", "b"), "video/avc")
 	if err := sink.WriteSample(0, []byte("x"), 1, keyFrame); err != nil {
 		t.Fatal(err)
 	}
@@ -217,12 +217,35 @@ func TestBinaryDumpEmptyAndMissingDirectory(t *testing.T) {
 }
 
 func TestBinaryDumpSameKeyframePTSAppends(t *testing.T) {
-	sink := NewBinaryDumpSink(t.TempDir())
+	sink := NewBinaryDumpSink(t.TempDir(), "video/avc;audio/opus")
 	sink.WriteSample(0, []byte("video"), 100, keyFrame)
 	sink.WriteSample(1, []byte("audio"), 100, keyFrame)
 	sink.Close()
 	got := readAll(t, sink, 0)
 	if len(got) != 2 || got[0].Track != 0 || got[1].Track != 1 {
 		t.Fatalf("got %+v", got)
+	}
+}
+
+// Audio encoders flag every sample as a keyframe; that must not start new files.
+func TestBinaryDumpOnlyVideoKeyframesSplit(t *testing.T) {
+	sink := NewBinaryDumpSink(t.TempDir(), "audio/mp4a-latm;video/avc")
+	sink.WriteSample(0, []byte("a0"), 90, keyFrame) // before the first video keyframe: dropped
+	sink.WriteSample(1, []byte("v0"), 100, keyFrame)
+	sink.WriteSample(0, []byte("a1"), 110, keyFrame)
+	sink.WriteSample(0, []byte("a2"), 120, keyFrame)
+	sink.WriteSample(1, []byte("v1"), 200, keyFrame)
+	sink.WriteSample(0, []byte("a3"), 210, keyFrame)
+	sink.Close()
+
+	manifest, err := sink.ReadManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest) != 2 || manifest[0].PTS != 100 || manifest[1].PTS != 200 {
+		t.Fatalf("manifest %+v, want files at 100 and 200", manifest)
+	}
+	if got := readAll(t, sink, 0); len(got) != 5 {
+		t.Fatalf("got %d samples, want 5", len(got))
 	}
 }

@@ -38,7 +38,7 @@ func rtspAddrs(t *testing.T) (rtsp, rtp, rtcp string) {
 }
 
 func TestRTSPServerCloseReleasesPorts(t *testing.T) {
-	disk := NewBinaryDumpSink(t.TempDir())
+	disk := NewBinaryDumpSink(t.TempDir(), "video/avc;audio/opus")
 	rtsp, rtpAddr, rtcp := rtspAddrs(t)
 	for i := 0; i < 3; i++ {
 		s, err := newRTSPServerSink(disk, "audio/opus", rtsp, rtpAddr, rtcp)
@@ -67,7 +67,7 @@ func TestRTSPServerCloseReleasesPorts(t *testing.T) {
 }
 
 func TestRTSPServerInvalidMimeTypeReleasesPorts(t *testing.T) {
-	disk := NewBinaryDumpSink(t.TempDir())
+	disk := NewBinaryDumpSink(t.TempDir(), "video/avc;audio/opus")
 	rtsp, rtpAddr, rtcp := rtspAddrs(t)
 	if _, err := newRTSPServerSink(disk, "audio/opus;bogus", rtsp, rtpAddr, rtcp); err == nil {
 		t.Fatal("expected error")
@@ -80,7 +80,7 @@ func TestRTSPServerInvalidMimeTypeReleasesPorts(t *testing.T) {
 }
 
 func TestRTSPServerRecordedPlayback(t *testing.T) {
-	disk := NewBinaryDumpSink(t.TempDir())
+	disk := NewBinaryDumpSink(t.TempDir(), "video/avc;audio/opus")
 	const origin = int64(1_000_000)
 	const samples = 6
 	for i := int64(0); i < samples; i++ {

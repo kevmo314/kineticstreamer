@@ -68,13 +68,14 @@ func GoRTMPServerStart(handle int64) int32 {
 
 //export GoRTMPServerStop
 func GoRTMPServerStop(handle int64) {
+	// Stop can block on the network; never do it under the global lock.
 	mu.Lock()
 	server, ok := rtmpServers[handle]
+	delete(rtmpServers, handle)
+	mu.Unlock()
 	if ok {
 		server.Stop()
-		delete(rtmpServers, handle)
 	}
-	mu.Unlock()
 }
 
 //export GoRTMPServerGetPort
@@ -244,9 +245,9 @@ func GoRTMPSourceIsClosed(handle int64) int32 {
 func GoRTMPSourceClose(handle int64) {
 	mu.Lock()
 	source, ok := rtmpSources[handle]
+	delete(rtmpSources, handle)
+	mu.Unlock()
 	if ok {
 		source.Close()
-		delete(rtmpSources, handle)
 	}
-	mu.Unlock()
 }

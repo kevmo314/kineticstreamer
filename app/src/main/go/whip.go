@@ -62,6 +62,17 @@ type whipTrack struct {
 	lastLogPTS int64
 }
 
+// inheritParamSets copies o's SPS/PPS into t. The slices are copied because
+// o keeps appending into its own backing arrays.
+func (t *whipTrack) inheritParamSets(o *whipTrack) {
+	o.mu.Lock()
+	sps, pps := bytes.Clone(o.sps), bytes.Clone(o.pps)
+	o.mu.Unlock()
+	t.mu.Lock()
+	t.sps, t.pps = sps, pps
+	t.mu.Unlock()
+}
+
 const (
 	// Playout delay RTP header extension URI
 	playoutDelayExtensionURI = "http://www.webrtc.org/experiments/rtp-hdrext/playout-delay"
@@ -428,10 +439,7 @@ func (s *WHIPSink) reconnect(old *whipConn) {
 		if err == nil {
 			// Encoders may emit SPS/PPS only once, so carry them over.
 			if len(old.tracks) > 0 && len(c.tracks) > 0 {
-				o, n := old.tracks[0], c.tracks[0]
-				o.mu.Lock()
-				n.sps, n.pps = o.sps, o.pps
-				o.mu.Unlock()
+				c.tracks[0].inheritParamSets(old.tracks[0])
 			}
 			s.install(c)
 			log.Printf("WHIP reconnection successful")

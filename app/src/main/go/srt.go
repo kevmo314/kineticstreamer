@@ -513,9 +513,9 @@ func (s *SRTSink) reconnect() error {
 	}
 }
 
-// WriteSample muxes one sample. If the connection breaks, the calling writer
-// becomes the reconnect owner and blocks until it is back; concurrent writers
-// drop their samples meanwhile (the muxer state is reset on reconnect anyway).
+// WriteSample muxes one sample. If the connection breaks, a background
+// goroutine reconnects and samples are dropped meanwhile (the muxer state is
+// reset on reconnect anyway), so the caller never blocks on the network.
 func (s *SRTSink) WriteSample(i int, buf []byte, ptsMicroseconds int64, mediaCodecFlags int32) error {
 	s.Lock()
 	if s.closed {
@@ -546,8 +546,13 @@ func (s *SRTSink) WriteSample(i int, buf []byte, ptsMicroseconds int64, mediaCod
 	C.srt_close(s.fd)
 	s.fd = srtInvalidSock
 	s.Unlock()
-	// Drop this sample either way.
-	return s.reconnect()
+	// Drop this sample; the reconnect result is only logged.
+	go func() {
+		if err := s.reconnect(); err != nil {
+			log.Printf("SRT: %v\n", err)
+		}
+	}()
+	return nil
 }
 
 func (s *SRTSink) Close() error {

@@ -3,7 +3,9 @@ package kinetic
 import (
 	"bufio"
 	"io"
+	"log"
 
+	"github.com/bluenviron/mediacommon/pkg/codecs/mpeg4audio"
 	"github.com/bluenviron/mediacommon/pkg/formats/mpegts"
 )
 
@@ -57,7 +59,7 @@ func (m *tsMux) writeSample(t *mpegts.Track, buf []byte, ptsMicroseconds int64, 
 	isConfig := MediaCodecBufferFlag(mediaCodecFlags)&MediaCodecBufferFlagCodecConfig != 0
 
 	var err error
-	switch t.Codec.(type) {
+	switch codec := t.Codec.(type) {
 	case *mpegts.CodecH264, *mpegts.CodecH265:
 		nalus := splitNALUs(buf)
 		if len(nalus) == 0 {
@@ -87,6 +89,15 @@ func (m *tsMux) writeSample(t *mpegts.Track, buf []byte, ptsMicroseconds int64, 
 		err = m.mpw.WriteOpus(t, pts, [][]byte{buf})
 	case *mpegts.CodecMPEG4Audio:
 		if isConfig {
+			// The AudioSpecificConfig carries the real sample rate and channel
+			// count, which the ADTS headers written below must match.
+			var conf mpeg4audio.Config
+			if err := conf.Unmarshal(buf); err != nil {
+				// Not worth tearing the connection down; keep the previous config.
+				log.Printf("TS: ignoring invalid AAC config %x: %v", buf, err)
+				return nil
+			}
+			codec.Config = conf
 			return nil
 		}
 		err = m.mpw.WriteMPEG4Audio(t, pts, [][]byte{buf})

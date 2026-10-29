@@ -357,3 +357,23 @@ func TestSplitAnnexB(t *testing.T) {
 		t.Error("expected no NALs without a start code")
 	}
 }
+
+// The new connection's track must own its SPS/PPS: the old track keeps
+// appending into its backing arrays (append(t.sps[:0], ...)) until it is torn down.
+func TestWHIPTrack_InheritParamSetsCopies(t *testing.T) {
+	old := &whipTrack{sps: []byte{0x67, 1, 2}, pps: []byte{0x68, 3}}
+	n := &whipTrack{}
+	n.inheritParamSets(old)
+
+	old.sps = append(old.sps[:0], 0xff, 0xff, 0xff)
+	old.pps = append(old.pps[:0], 0xee, 0xee)
+	if !bytes.Equal(n.sps, []byte{0x67, 1, 2}) || !bytes.Equal(n.pps, []byte{0x68, 3}) {
+		t.Errorf("inherited param sets alias the old track: sps=%x pps=%x", n.sps, n.pps)
+	}
+
+	empty := &whipTrack{}
+	empty.inheritParamSets(&whipTrack{})
+	if empty.sps != nil || empty.pps != nil {
+		t.Errorf("empty param sets should stay nil: sps=%x pps=%x", empty.sps, empty.pps)
+	}
+}

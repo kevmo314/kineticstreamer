@@ -76,20 +76,28 @@ func decodeRecord(r io.Reader) (*BinaryDumpSample, error) {
 
 type BinaryDumpSink struct {
 	directory string
+	video     []bool // per track: only video keyframes start a new file
 
 	mu   sync.Mutex
 	file *os.File
 }
 
-func NewBinaryDumpSink(directory string) *BinaryDumpSink {
-	return &BinaryDumpSink{directory: directory}
+// NewBinaryDumpSink records into directory. encodedMediaFormatMimeTypes lists the
+// tracks (";"-separated, as for the other sinks); audio encoders flag every
+// sample as a keyframe, so only the video tracks may split files.
+func NewBinaryDumpSink(directory, encodedMediaFormatMimeTypes string) *BinaryDumpSink {
+	var video []bool
+	for _, m := range strings.Split(encodedMediaFormatMimeTypes, ";") {
+		video = append(video, strings.HasPrefix(m, "video/"))
+	}
+	return &BinaryDumpSink{directory: directory, video: video}
 }
 
 func (s *BinaryDumpSink) WriteSample(track int, buf []byte, ptsMicroseconds int64, mediaCodecFlags int32) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// if it's a keyframe, create a new file based on the pts.
-	if MediaCodecBufferFlag(mediaCodecFlags)&MediaCodecBufferFlagKeyFrame != 0 {
+	// if it's a video keyframe, create a new file based on the pts.
+	if MediaCodecBufferFlag(mediaCodecFlags)&MediaCodecBufferFlagKeyFrame != 0 && track >= 0 && track < len(s.video) && s.video[track] {
 		if s.file != nil {
 			err := s.file.Close()
 			s.file = nil
