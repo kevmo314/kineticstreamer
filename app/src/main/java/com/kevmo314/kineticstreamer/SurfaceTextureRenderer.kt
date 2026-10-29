@@ -179,10 +179,6 @@ class SurfaceTextureRenderer {
     @Volatile
     var timestampOffsetNanos: Long = 0
 
-    // Stream start time for wall-clock timestamp synchronization with audio
-    @Volatile
-    var streamStartTimeNanos: Long = 0
-
     init {
         runOnGl {
             setupEGL()
@@ -428,11 +424,11 @@ class SurfaceTextureRenderer {
     }
 
     /**
-     * Convert pixel bounds to normalized coordinates. X is mirrored to account for the
-     * video coordinate system.
+     * Convert pixel bounds (origin top-left, relative to a [screenWidth]x[screenHeight] frame)
+     * to normalized coordinates.
      */
     private fun updateOverlayBounds(x: Int, y: Int, width: Int, height: Int, screenWidth: Int, screenHeight: Int) {
-        overlayBounds[0] = 1.0f - (x.toFloat() + width.toFloat()) / screenWidth.toFloat()
+        overlayBounds[0] = x.toFloat() / screenWidth.toFloat()
         overlayBounds[1] = y.toFloat() / screenHeight.toFloat()
         overlayBounds[2] = width.toFloat() / screenWidth.toFloat()
         overlayBounds[3] = height.toFloat() / screenHeight.toFloat()
