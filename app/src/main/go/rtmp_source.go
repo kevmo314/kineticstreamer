@@ -280,7 +280,6 @@ func (h *rtmpHandler) OnAudio(timestamp uint32, payload io.Reader) error {
 	if src.closed {
 		return nil
 	}
-	src.lastAudioPTS = pts
 	select {
 	case src.audioQueue <- &MediaFrame{Data: data, PTS: pts}:
 	default:
@@ -352,7 +351,6 @@ func (s *RTMPSource) pushVideo(frame *MediaFrame, isKey bool) {
 	if s.closed {
 		return
 	}
-	s.lastVideoPTS = frame.PTS
 	if s.needKeyframe && !isKey {
 		return
 	}
@@ -477,13 +475,25 @@ func (h *rtmpHandler) OnClose() {
 // ReadVideoFrame reads the next video frame (blocking)
 // Returns nil when source is closed and drained
 func (s *RTMPSource) ReadVideoFrame() *MediaFrame {
-	return readFrame(s.videoQueue, s.done)
+	f := readFrame(s.videoQueue, s.done)
+	if f != nil {
+		s.mu.Lock()
+		s.lastVideoPTS = f.PTS
+		s.mu.Unlock()
+	}
+	return f
 }
 
 // ReadAudioFrame reads the next audio frame (blocking)
 // Returns nil when source is closed and drained
 func (s *RTMPSource) ReadAudioFrame() *MediaFrame {
-	return readFrame(s.audioQueue, s.done)
+	f := readFrame(s.audioQueue, s.done)
+	if f != nil {
+		s.mu.Lock()
+		s.lastAudioPTS = f.PTS
+		s.mu.Unlock()
+	}
+	return f
 }
 
 func readFrame(q chan *MediaFrame, done chan struct{}) *MediaFrame {
@@ -500,14 +510,14 @@ func readFrame(q chan *MediaFrame, done chan struct{}) *MediaFrame {
 	}
 }
 
-// GetVideoPTS returns the PTS of the last video frame
+// GetVideoPTS returns the PTS of the last video frame returned by ReadVideoFrame
 func (s *RTMPSource) GetVideoPTS() int64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.lastVideoPTS
 }
 
-// GetAudioPTS returns the PTS of the last audio frame
+// GetAudioPTS returns the PTS of the last audio frame returned by ReadAudioFrame
 func (s *RTMPSource) GetAudioPTS() int64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

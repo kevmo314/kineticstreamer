@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/bluenviron/mediacommon/pkg/formats/mpegts"
 )
 
 func srtRefCount() int {
@@ -322,7 +324,83 @@ func TestSRTSink_CloseDuringReconnect(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("reconnect loop did not stop on Close")
 	}
-	if n := srtRefCount(); n != before {
-		t.Fatalf("refcount %d, want %d", n, before)
+	// The reconnect goroutine releases the reference when it notices the close.
+	deadline := time.Now().Add(5 * time.Second)
+	for srtRefCount() != before {
+		if time.Now().After(deadline) {
+			t.Fatalf("refcount %d, want %d", srtRefCount(), before)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A broken connection must not stall the caller: WriteSample drops samples
+// and returns immediately while the reconnect runs in the background. (The
+// first reconnect attempt only starts after a 500ms backoff, so a blocking
+// WriteSample takes at least that long.)
+func TestSRTSink_WriteSampleDoesNotBlockWhileReconnecting(t *testing.T) {
+	l, err := newSRTTestListener()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cch := make(chan *srtTestConn, 1)
+	go func() { c, _ := l.Accept(); cch <- c }()
+	sink, err := NewSRTSink(fmt.Sprintf("srt://127.0.0.1:%d?conntimeo=500", l.Port()), string(MediaFormatMimeTypeVideoH264))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := <-cch
+	go c.Drain()
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		c.Close()
+		l.Close()
+	}()
+
+	// The listener dies 300ms in; keep writing well past that.
+	var slowest time.Duration
+	done := make(chan error, 1)
+	go func() {
+		for i := 0; i < 300; i++ {
+			start := time.Now()
+			if err := sink.WriteSample(0, testAnnexB, int64(i)*33_000, int32(MediaCodecBufferFlagKeyFrame)); err != nil {
+				done <- err
+				return
+			}
+			slowest = max(slowest, time.Since(start))
+			time.Sleep(10 * time.Millisecond)
+		}
+		done <- nil
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("WriteSample: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("WriteSample stalled while reconnecting")
+	}
+	if slowest > 200*time.Millisecond {
+		t.Errorf("WriteSample blocked for %v while reconnecting", slowest)
+	}
+	sink.Close()
+}
+
+// MediaCodec emits its codec-config buffer once; one that arrives while the
+// sink is reconnecting must still be kept and carried over.
+func TestSRTSink_CodecConfigDuringReconnect(t *testing.T) {
+	sink := &SRTSink{
+		tracks: []*mpegts.Track{{Codec: &mpegts.CodecH264{}}},
+		done:   make(chan struct{}),
+		fd:     srtInvalidSock,
+	}
+	sink.mux = newTSMux(&flakyWriter{}, 1316, sink.tracks)
+	sink.reconnecting = true
+
+	if err := sink.WriteSample(0, testAnnexB[:22], 0, int32(MediaCodecBufferFlagCodecConfig)); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.mux.paramSets) != 2 {
+		t.Errorf("param sets = %d, want 2: config buffer dropped while reconnecting", len(sink.mux.paramSets))
 	}
 }

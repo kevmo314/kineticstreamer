@@ -644,3 +644,29 @@ func TestStopUnblocksWaitForSource(t *testing.T) {
 		t.Fatal("WaitForSource not released by Stop")
 	}
 }
+
+// GetVideoPTS/GetAudioPTS must describe the frame the reader just got, not the
+// newest queued one, and a frame dropped on overflow must not move them.
+func TestPTSTracksFramesReturnedToReader(t *testing.T) {
+	src := newRTMPSource(2, 2)
+	h := &rtmpHandler{source: src}
+
+	for i := int64(1); i <= 3; i++ { // the third video frame overflows the queue
+		src.pushVideo(&MediaFrame{Data: []byte{1}, PTS: i * 1000}, true)
+		h.OnAudio(uint32(i), flvAAC(1, []byte{1, 2, 3}))
+	}
+	if v, a := src.GetVideoPTS(), src.GetAudioPTS(); v != 0 || a != 0 {
+		t.Errorf("PTS before any read = %d/%d, want 0/0", v, a)
+	}
+
+	src.ReadVideoFrame()
+	src.ReadAudioFrame()
+	if v, a := src.GetVideoPTS(), src.GetAudioPTS(); v != 1000 || a != 1000 {
+		t.Errorf("PTS after first read = %d/%d, want 1000/1000", v, a)
+	}
+	src.ReadVideoFrame()
+	src.ReadAudioFrame()
+	if v, a := src.GetVideoPTS(), src.GetAudioPTS(); v != 2000 || a != 2000 {
+		t.Errorf("PTS after second read = %d/%d, want 2000/2000", v, a)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/bluenviron/mediacommon/pkg/codecs/mpeg4audio"
 	"github.com/bluenviron/mediacommon/pkg/formats/mpegts"
 )
 
@@ -122,5 +123,41 @@ func TestTSMux_MultiTrackRecovery(t *testing.T) {
 	}
 	if len(pcrPIDs) != 1 {
 		t.Fatalf("PCR on PIDs %v, want exactly one", pcrPIDs)
+	}
+}
+
+// The ADTS headers must follow the encoder's AudioSpecificConfig rather than the
+// 48kHz stereo default, and an invalid config must not break the stream.
+func TestTSMux_AACConfigFromCodecConfigBuffer(t *testing.T) {
+	w := &flakyWriter{}
+	track := &mpegts.Track{Codec: MediaFormatMimeTypeAudioAAC.MPEGTSCodec()}
+	m := newTSMux(w, 1316, []*mpegts.Track{track})
+	config := int32(MediaCodecBufferFlagCodecConfig)
+
+	// AAC-LC, 44.1kHz (index 4), mono.
+	if err := m.writeSample(track, []byte{0x12, 0x08}, 0, config); err != nil {
+		t.Fatal(err)
+	}
+	// Truncated, and an explicit 24-bit sample rate that ADTS can't express: both ignored.
+	for _, bad := range [][]byte{{0xff}, {0x17, 0x80, 0x0b, 0xb8, 0x08}} {
+		if err := m.writeSample(track, bad, 0, config); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.writeSample(track, []byte{1, 2, 3, 4}, 1000, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := mpegts.NewReader(bytes.NewReader(w.got.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var conf *mpeg4audio.Config
+	r.OnDataMPEG4Audio(r.Tracks()[0], func(_ int64, _ [][]byte) error { return nil })
+	for r.Read() == nil {
+	}
+	conf = &r.Tracks()[0].Codec.(*mpegts.CodecMPEG4Audio).Config
+	if conf.SampleRate != 44100 || conf.ChannelCount != 1 {
+		t.Errorf("stream config = %d Hz / %d ch, want 44100 / 1", conf.SampleRate, conf.ChannelCount)
 	}
 }
