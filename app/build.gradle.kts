@@ -5,9 +5,9 @@ plugins {
     id("kotlin-parcelize")
 }
 
-// ABIs to build native code for: Android Studio's injected ABI, else -PnativeAbis=x86_64,
-// else all (what CI and release builds want).
-val nativeAbis = providers.gradleProperty("android.injected.build.abi")
+// ABIs to build native code for: the device's preferred ABI as injected by Android Studio
+// (its first, comma separated), else -PnativeAbis=x86_64, else all (what CI and release want).
+val nativeAbis = providers.gradleProperty("android.injected.build.abi").map { it.substringBefore(",") }
     .orElse(providers.gradleProperty("nativeAbis"))
     .orElse("arm64-v8a,armeabi-v7a,x86,x86_64")
     .get().split(",")
