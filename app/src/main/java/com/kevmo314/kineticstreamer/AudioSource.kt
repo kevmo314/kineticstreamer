@@ -88,11 +88,17 @@ fun AudioSource(context: Context, deviceId: Int?): Flow<TimestampedAudio> = call
 
         if (audioRecord.state != AudioRecord.STATE_INITIALIZED) {
             Log.e("AudioSource", "AudioRecord failed to initialize for device: $deviceName")
+            audioRecord.release()
             close()
             return@callbackFlow
         }
 
-        audioRecord.startRecording()
+        try {
+            audioRecord.startRecording()
+        } catch (e: Exception) {
+            audioRecord.release()
+            throw e
+        }
         val actualSampleRate = audioRecord.sampleRate
         val actualChannelCount = audioRecord.channelCount
         val actualEncoding = audioRecord.audioFormat
@@ -158,8 +164,9 @@ fun AudioSource(context: Context, deviceId: Int?): Flow<TimestampedAudio> = call
         awaitClose {
             Log.i("AudioSource", "Closing audio source: $deviceName")
             recordThread.interrupt()
-            recordThread.join(1000) // Wait max 1 second for thread to finish
-            audioRecord.stop()
+            // Stop first so a blocked read() returns, then wait for the thread before releasing.
+            runCatching { audioRecord.stop() }
+            recordThread.join(1000)
             audioRecord.release()
         }
 

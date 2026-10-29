@@ -16,6 +16,7 @@
         android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:allowBackup="true"
@@ -48,6 +49,9 @@
             android:enabled="true"
             android:foregroundServiceType="camera|microphone" />
         <receiver
+            android:name=".StreamingService$UsbPermissionReceiver"
+            android:exported="false" />
+        <receiver
             android:name=".StreamingService$UsbReceiver"
             android:enabled="true"
             android:exported="true">
@@ -61,4 +65,4 @@
         </receiver>
     </application>
 
-</manifest>
+</manifest>
