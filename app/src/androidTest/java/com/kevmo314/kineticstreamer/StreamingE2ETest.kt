@@ -22,8 +22,8 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
-import java.net.HttpURLConnection
-import java.net.URL
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
@@ -62,22 +62,22 @@ class StreamingE2ETest {
         }
     }
 
+    // A raw socket: the app's network security policy forbids cleartext HttpURLConnection.
     private fun get(path: String, timeoutMs: Int): Pair<Int, String> {
-        val conn = URL("http://$host:9100$path").openConnection() as HttpURLConnection
-        conn.connectTimeout = 3000
-        conn.readTimeout = timeoutMs
-        return try {
-            val stream = if (conn.responseCode < 400) conn.inputStream else conn.errorStream
-            conn.responseCode to stream.bufferedReader().readText()
-        } finally {
-            conn.disconnect()
+        Socket().use { socket ->
+            socket.soTimeout = timeoutMs
+            socket.connect(InetSocketAddress(host, 9100), 3000)
+            socket.getOutputStream().write("GET $path HTTP/1.0\r\nHost: $host\r\n\r\n".toByteArray())
+            val response = socket.getInputStream().readBytes().decodeToString()
+            return response.substringAfter("HTTP/1.0 ").substringBefore(' ').toInt() to response.substringAfter("\r\n\r\n")
         }
     }
 
     @Before
     fun requireReceiver() {
         val required = InstrumentationRegistry.getArguments().getString("e2eRequired") == "true"
-        val up = runCatching { get("/health", 3000).first == 200 }.getOrDefault(false)
+        val up = runCatching { get("/health", 3000).first == 200 }
+            .onFailure { Log.w(tag, "receiver health check failed", it) }.getOrDefault(false)
         if (required) assertTrue("e2e receiver not reachable at $host:9100", up) else assumeTrue("no e2e receiver", up)
     }
 
