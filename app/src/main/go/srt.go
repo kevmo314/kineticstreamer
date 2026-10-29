@@ -67,7 +67,7 @@ static int srt_get_bwe_stats(SRTSOCKET sock, srt_bwe_stats_t* out) {
 */
 import "C"
 import (
-	"bufio"
+	"encoding/binary"
 	"fmt"
 	"log"
 	"net"
@@ -138,61 +138,71 @@ var SocketOptions = []socketOption{
 	{"packetfilter", 0, C.SRTO_PACKETFILTER, bindingPre, tString},
 }
 
-func setSocketOptions(s C.int, binding int, options map[string]string) error {
+// encodeSocketOption converts a URL option value into the raw bytes libsrt
+// expects for the option's type.
+func encodeSocketOption(so socketOption, val string) ([]byte, error) {
+	switch so.dataType {
+	case tInteger32:
+		v, err := strconv.ParseInt(val, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("option %s: invalid integer %q", so.name, val)
+		}
+		return binary.NativeEndian.AppendUint32(nil, uint32(v)), nil
+	case tInteger64:
+		v, err := strconv.ParseInt(val, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("option %s: invalid integer %q", so.name, val)
+		}
+		return binary.NativeEndian.AppendUint64(nil, uint64(v)), nil
+	case tString:
+		return []byte(val), nil
+	case tBoolean:
+		v, err := strconv.ParseBool(val)
+		if err != nil {
+			return nil, fmt.Errorf("option %s: invalid boolean %q", so.name, val)
+		}
+		if v {
+			return []byte{1}, nil
+		}
+		return []byte{0}, nil
+	case tTransType:
+		switch val {
+		case "live":
+			return binary.NativeEndian.AppendUint32(nil, C.SRTT_LIVE), nil
+		case "file":
+			return binary.NativeEndian.AppendUint32(nil, C.SRTT_FILE), nil
+		}
+		return nil, fmt.Errorf("option %s: invalid value %q (want live or file)", so.name, val)
+	}
+	return nil, fmt.Errorf("option %s: unsupported type", so.name)
+}
+
+// validateSocketOptions reports the first known option with an unparseable
+// value. Unknown option names are ignored.
+func validateSocketOptions(options map[string]string) error {
 	for _, so := range SocketOptions {
 		if val, ok := options[so.name]; ok {
-			if so.binding == binding {
-				if so.dataType == tInteger32 {
-					v, err := strconv.Atoi(val)
-					v32 := int32(v)
-					if err == nil {
-						result := C.srt_setsockflag(s, C.SRT_SOCKOPT(so.option), unsafe.Pointer(&v32), C.int32_t(unsafe.Sizeof(v32)))
-						if result == -1 {
-							return fmt.Errorf("warning - error setting option %s to %s, %w", so.name, val, srtGetAndClearError())
-						}
-					}
-				} else if so.dataType == tInteger64 {
-					v, err := strconv.ParseInt(val, 10, 64)
-					if err == nil {
-						result := C.srt_setsockflag(s, C.SRT_SOCKOPT(so.option), unsafe.Pointer(&v), C.int32_t(unsafe.Sizeof(v)))
-						if result == -1 {
-							return fmt.Errorf("warning - error setting option %s to %s, %w", so.name, val, srtGetAndClearError())
-						}
-					}
-				} else if so.dataType == tString {
-					sval := C.CString(val)
-					defer C.free(unsafe.Pointer(sval))
-					result := C.srt_setsockflag(s, C.SRT_SOCKOPT(so.option), unsafe.Pointer(sval), C.int32_t(len(val)))
-					if result == -1 {
-						return fmt.Errorf("warning - error setting option %s to %s, %w", so.name, val, srtGetAndClearError())
-					}
-
-				} else if so.dataType == tBoolean {
-					var result C.int
-					if val == "1" {
-						v := C.char(1)
-						result = C.srt_setsockflag(s, C.SRT_SOCKOPT(so.option), unsafe.Pointer(&v), C.int32_t(unsafe.Sizeof(v)))
-					} else if val == "0" {
-						v := C.char(0)
-						result = C.srt_setsockflag(s, C.SRT_SOCKOPT(so.option), unsafe.Pointer(&v), C.int32_t(unsafe.Sizeof(v)))
-					}
-					if result == -1 {
-						return fmt.Errorf("warning - error setting option %s to %s, %w", so.name, val, srtGetAndClearError())
-					}
-				} else if so.dataType == tTransType {
-					var result C.int
-					if val == "live" {
-						var v int32 = C.SRTT_LIVE
-						result = C.srt_setsockflag(s, C.SRT_SOCKOPT(so.option), unsafe.Pointer(&v), C.int32_t(unsafe.Sizeof(v)))
-					} else if val == "file" {
-						var v int32 = C.SRTT_FILE
-						result = C.srt_setsockflag(s, C.SRT_SOCKOPT(so.option), unsafe.Pointer(&v), C.int32_t(unsafe.Sizeof(v)))
-					}
-					if result == -1 {
-						return fmt.Errorf("warning - error setting option %s to %s: %w", so.name, val, srtGetAndClearError())
-					}
-				}
+			if _, err := encodeSocketOption(so, val); err != nil {
+				return err
 			}
+		}
+	}
+	return nil
+}
+
+func setSocketOptions(s C.int, binding int, options map[string]string) error {
+	for _, so := range SocketOptions {
+		val, ok := options[so.name]
+		if !ok || so.binding != binding {
+			continue
+		}
+		b, err := encodeSocketOption(so, val)
+		if err != nil {
+			return err
+		}
+		// SliceData is non-nil even for an empty (string) value.
+		if C.srt_setsockflag(s, C.SRT_SOCKOPT(so.option), unsafe.Pointer(unsafe.SliceData(b)), C.int32_t(len(b))) == -1 {
+			return fmt.Errorf("error setting option %s to %s: %w", so.name, val, srtGetAndClearError())
 		}
 	}
 	return nil
@@ -255,12 +265,16 @@ const (
 type SRTSink struct {
 	sync.Mutex
 
-	mpw         *mpegts.Writer
-	bw          *bufio.Writer
-	sck         SRTSocket
+	mux         *tsMux
+	fd          C.int // srtInvalidSock while reconnecting
 	tracks      []*mpegts.Track
 	pliCallback SRTPLICallback
 	closed      bool
+	done        chan struct{} // closed by Close to interrupt reconnect backoff
+
+	// reconnecting is set by the one writer that owns the reconnect loop;
+	// other writers drop their samples until it clears.
+	reconnecting bool
 
 	// Connection parameters for reconnect
 	ip      net.IP
@@ -274,7 +288,35 @@ type SRTSink struct {
 	lastPktSndLossTotal int64     // For detecting new packet loss
 }
 
-var sinkCount int
+// srtInvalidSock is libsrt's SRT_INVALID_SOCK (a C++ const cgo cannot link).
+const srtInvalidSock = -1
+
+// srtDebugStats enables per-probe SRT stats logging.
+var srtDebugStats = false
+
+// srtRefs counts live sinks so srt_startup/srt_cleanup bracket them.
+var srtRefs struct {
+	sync.Mutex
+	n int
+}
+
+func srtAcquire() {
+	srtRefs.Lock()
+	defer srtRefs.Unlock()
+	if srtRefs.n == 0 {
+		C.srt_startup()
+	}
+	srtRefs.n++
+}
+
+func srtRelease() {
+	srtRefs.Lock()
+	defer srtRefs.Unlock()
+	srtRefs.n--
+	if srtRefs.n == 0 {
+		C.srt_cleanup()
+	}
+}
 
 func sockAddrFromIp4(ip net.IP, port uint16) (*C.struct_sockaddr, int, error) {
 	var raw syscall.RawSockaddrInet4
@@ -340,6 +382,9 @@ func NewSRTSink(s, encodedMediaFormatMimeTypes string) (*SRTSink, error) {
 			options[k] = v[0]
 		}
 	}
+	if err := validateSocketOptions(options); err != nil {
+		return nil, fmt.Errorf("SRT: %w", err)
+	}
 
 	tracks := []*mpegts.Track{}
 	for _, v := range strings.Split(encodedMediaFormatMimeTypes, ";") {
@@ -347,79 +392,72 @@ func NewSRTSink(s, encodedMediaFormatMimeTypes string) (*SRTSink, error) {
 		tracks = append(tracks, &mpegts.Track{Codec: codec})
 	}
 
-	if sinkCount == 0 {
-		C.srt_startup()
-	}
-	sinkCount++
-
+	srtAcquire()
 	sink := &SRTSink{
 		tracks:        tracks,
+		done:          make(chan struct{}),
 		ip:            ip,
 		port:          uint16(port),
 		options:       options,
 		targetBitrate: startBitrateBps,
 	}
 
-	if err := sink.connect(); err != nil {
-		sinkCount--
-		if sinkCount == 0 {
-			C.srt_cleanup()
-		}
+	sck, err := sink.connect()
+	if err != nil {
+		srtRelease()
 		return nil, err
 	}
+	sink.fd = sck.fd
+	sink.mux = newTSMux(sck, sck.payloadSize, tracks)
 
 	log.Printf("SRT: sink created with %d tracks\n", len(tracks))
 	return sink, nil
 }
 
-// connect creates a new SRT socket and connects. Caller must hold the lock or
-// be in the constructor (no concurrent access yet).
-func (s *SRTSink) connect() error {
+// connect creates a new SRT socket and connects it. It touches no mutable sink
+// state, so it must be called without holding the lock (it can block for the
+// connect timeout).
+func (s *SRTSink) connect() (SRTSocket, error) {
 	sa, salen, err := sockAddrFromIp(s.ip, s.port)
 	if err != nil {
-		return fmt.Errorf("SRT: failed to create sockaddr: %w", err)
+		return SRTSocket{}, fmt.Errorf("SRT: failed to create sockaddr: %w", err)
 	}
 
 	fd := C.srt_create_socket()
+	if fd == srtInvalidSock {
+		return SRTSocket{}, fmt.Errorf("SRT: failed to create socket: %w", srtGetAndClearError())
+	}
 
 	if err := setSocketOptions(fd, bindingPre, s.options); err != nil {
 		C.srt_close(fd)
-		return fmt.Errorf("SRT: failed to set pre-bind options: %w", err)
+		return SRTSocket{}, fmt.Errorf("SRT: failed to set pre-bind options: %w", err)
 	}
 
 	log.Printf("SRT: connecting to %s:%d...\n", s.ip, s.port)
 	if res := C.srt_connect(fd, sa, C.int(salen)); res == -1 {
 		err := srtGetAndClearError()
 		C.srt_close(fd)
-		return fmt.Errorf("SRT: connect failed: %w", err)
+		return SRTSocket{}, fmt.Errorf("SRT: connect failed: %w", err)
 	}
 	log.Printf("SRT: connected\n")
 
 	if err := setSocketOptions(fd, bindingPost, s.options); err != nil {
 		C.srt_close(fd)
-		return fmt.Errorf("SRT: failed to set post-bind options: %w", err)
+		return SRTSocket{}, fmt.Errorf("SRT: failed to set post-bind options: %w", err)
 	}
 
-	var payloadSize C.int
-	if res, _ := C.srt_getsockflag(fd, C.SRTO_PAYLOADSIZE, unsafe.Pointer(&payloadSize), (*C.int)(unsafe.Pointer(&payloadSize))); res == -1 {
+	var payloadSize, optlen C.int = 0, C.int(unsafe.Sizeof(C.int(0)))
+	if res, _ := C.srt_getsockflag(fd, C.SRTO_PAYLOADSIZE, unsafe.Pointer(&payloadSize), &optlen); res == -1 || payloadSize <= 0 {
 		C.srt_close(fd)
-		return fmt.Errorf("SRT: failed to get payload size")
+		return SRTSocket{}, fmt.Errorf("SRT: failed to get payload size")
 	}
 
-	sck := SRTSocket{fd: fd, payloadSize: int(payloadSize)}
-	bw := bufio.NewWriterSize(sck, int(payloadSize))
-
-	s.sck = sck
-	s.bw = bw
-	s.mpw = mpegts.NewWriter(bw, s.tracks)
-	return nil
+	return SRTSocket{fd: fd, payloadSize: int(payloadSize)}, nil
 }
 
-// reconnect closes the old socket and tries to establish a new connection.
-// Caller must hold the lock.
+// reconnect replaces the broken connection. The caller must be the sole owner
+// (s.reconnecting set, old socket closed) and must not hold the lock.
 func (s *SRTSink) reconnect() error {
-	C.srt_close(s.sck.fd)
-
 	for attempt := 1; ; attempt++ {
 		delay := time.Duration(attempt) * 500 * time.Millisecond
 		if delay > 5*time.Second {
@@ -427,128 +465,88 @@ func (s *SRTSink) reconnect() error {
 		}
 		log.Printf("SRT: reconnecting (attempt %d) in %v...\n", attempt, delay)
 
-		// Unlock while sleeping so Close() can proceed
-		s.Unlock()
-		time.Sleep(delay)
-		s.Lock()
-
-		if s.closed {
+		select {
+		case <-time.After(delay):
+		case <-s.done:
 			return fmt.Errorf("SRT: sink closed during reconnect")
 		}
 
-		if err := s.connect(); err != nil {
+		sck, err := s.connect()
+
+		s.Lock()
+		if s.closed {
+			s.Unlock()
+			if err == nil {
+				C.srt_close(sck.fd)
+			}
+			return fmt.Errorf("SRT: sink closed during reconnect")
+		}
+		if err != nil {
+			s.Unlock()
 			log.Printf("SRT: reconnect attempt %d failed: %v\n", attempt, err)
 			continue
 		}
+		s.fd = sck.fd
+		s.mux = newTSMux(sck, sck.payloadSize, s.tracks)
+		s.reconnecting = false
+		s.Unlock()
 
 		log.Printf("SRT: reconnected\n")
 		return nil
 	}
 }
 
-
-
-// splitNALUs splits an Annex B byte stream into individual NAL units.
-// It handles both 3-byte (0x00 0x00 0x01) and 4-byte (0x00 0x00 0x00 0x01) start codes.
-func splitNALUs(buf []byte) [][]byte {
-	var nalus [][]byte
-	start := -1
-
-	for i := 0; i < len(buf); i++ {
-		// Check for 4-byte start code
-		if i+3 < len(buf) && buf[i] == 0x00 && buf[i+1] == 0x00 && buf[i+2] == 0x00 && buf[i+3] == 0x01 {
-			if start >= 0 {
-				nalus = append(nalus, buf[start:i])
-			}
-			start = i + 4
-			i += 3
-			continue
-		}
-		// Check for 3-byte start code
-		if i+2 < len(buf) && buf[i] == 0x00 && buf[i+1] == 0x00 && buf[i+2] == 0x01 {
-			if start >= 0 {
-				nalus = append(nalus, buf[start:i])
-			}
-			start = i + 3
-			i += 2
-			continue
-		}
-	}
-
-	// Append the last NAL unit
-	if start >= 0 && start < len(buf) {
-		nalus = append(nalus, buf[start:])
-	}
-
-	return nalus
-}
-
+// WriteSample muxes one sample. If the connection breaks, the calling writer
+// becomes the reconnect owner and blocks until it is back; concurrent writers
+// drop their samples meanwhile (the muxer state is reset on reconnect anyway).
 func (s *SRTSink) WriteSample(i int, buf []byte, ptsMicroseconds int64, mediaCodecFlags int32) error {
 	s.Lock()
-	defer s.Unlock()
-
 	if s.closed {
+		s.Unlock()
 		return fmt.Errorf("SRT: sink closed")
 	}
-
 	if i >= len(s.tracks) {
+		s.Unlock()
 		return fmt.Errorf("SRT: invalid track index %d", i)
 	}
-
 	t := s.tracks[i]
 	if t.Codec == nil {
+		s.Unlock()
 		return fmt.Errorf("SRT: track %d has nil codec", i)
 	}
-
-	if err := s.writeSampleLocked(t, buf, ptsMicroseconds, mediaCodecFlags); err != nil {
-		log.Printf("SRT: write failed: %v, reconnecting...\n", err)
-		if reconnErr := s.reconnect(); reconnErr != nil {
-			return reconnErr
-		}
-		// Drop this sample - the mpegts writer state was reset on reconnect
+	if s.reconnecting {
+		s.Unlock()
 		return nil
 	}
-	return nil
-}
 
-func (s *SRTSink) writeSampleLocked(t *mpegts.Track, buf []byte, ptsMicroseconds int64, mediaCodecFlags int32) error {
-	isKeyframe := MediaCodecBufferFlag(mediaCodecFlags)&MediaCodecBufferFlagKeyFrame != 0
-	pts := int64((time.Duration(ptsMicroseconds) * time.Microsecond).Seconds() * 90000)
-
-	var err error
-	switch t.Codec.(type) {
-	case *mpegts.CodecH264, *mpegts.CodecH265:
-		nalus := splitNALUs(buf)
-		if len(nalus) == 0 {
-			return nil
-		}
-		err = s.mpw.WriteH26x(t, pts, pts, isKeyframe, nalus)
-	case *mpegts.CodecOpus:
-		err = s.mpw.WriteOpus(t, pts, [][]byte{buf})
-	case *mpegts.CodecMPEG4Audio:
-		err = s.mpw.WriteMPEG4Audio(t, pts, [][]byte{buf})
-	default:
+	err := s.mux.writeSample(t, buf, ptsMicroseconds, mediaCodecFlags)
+	if err == nil {
+		s.Unlock()
 		return nil
 	}
-	if err != nil {
-		return err
-	}
-
-	if err := s.bw.Flush(); err != nil {
-		return err
-	}
-	return nil
+	log.Printf("SRT: write failed: %v, reconnecting...\n", err)
+	s.reconnecting = true
+	C.srt_close(s.fd)
+	s.fd = srtInvalidSock
+	s.Unlock()
+	// Drop this sample either way.
+	return s.reconnect()
 }
 
 func (s *SRTSink) Close() error {
 	s.Lock()
-	defer s.Unlock()
-	s.closed = true
-	C.srt_close(s.sck.fd)
-	sinkCount--
-	if sinkCount == 0 {
-		C.srt_cleanup()
+	if s.closed {
+		s.Unlock()
+		return nil
 	}
+	s.closed = true
+	close(s.done)
+	if s.fd != srtInvalidSock {
+		C.srt_close(s.fd)
+		s.fd = srtInvalidSock
+	}
+	s.Unlock()
+	srtRelease()
 	return nil
 }
 
@@ -575,7 +573,7 @@ func (s *SRTSink) GetStatsAndBandwidth() int64 {
 
 	// Get SRT stats
 	var stats C.srt_bwe_stats_t
-	if C.srt_get_bwe_stats(s.sck.fd, &stats) != 0 {
+	if C.srt_get_bwe_stats(s.fd, &stats) != 0 {
 		return s.targetBitrate
 	}
 
@@ -592,11 +590,12 @@ func (s *SRTSink) GetStatsAndBandwidth() int64 {
 	retrans := int(stats.pktRetrans)
 	retransTotal := int64(stats.pktRetransTotal)
 
-	// Always log stats for debugging
-	log.Printf("SRT stats: RTT=%.0fms rate=%.2fMbps estBW=%.2fMbps cwnd=%d flight=%d sndbuf=%d",
-		rtt, sendRateMbps, estBwMbps, cwnd, flightSize, sndBuf)
-	log.Printf("SRT stats: loss=%d/%d retrans=%d/%d drops=%d/%d target=%dKbps",
-		lossInterval, lossTotal, retrans, retransTotal, drops, dropsTotal, s.targetBitrate/1000)
+	if srtDebugStats {
+		log.Printf("SRT stats: RTT=%.0fms rate=%.2fMbps estBW=%.2fMbps cwnd=%d flight=%d sndbuf=%d",
+			rtt, sendRateMbps, estBwMbps, cwnd, flightSize, sndBuf)
+		log.Printf("SRT stats: loss=%d/%d retrans=%d/%d drops=%d/%d target=%dKbps",
+			lossInterval, lossTotal, retrans, retransTotal, drops, dropsTotal, s.targetBitrate/1000)
+	}
 
 	// Check for packet loss
 	if lossTotal > s.lastPktSndLossTotal {
@@ -624,21 +623,15 @@ func (s *SRTSink) GetStatsAndBandwidth() int64 {
 
 	// Don't probe up during cooldown after loss
 	if !s.lastLossTime.IsZero() && now.Sub(s.lastLossTime) < bweLossCooldown {
-		log.Printf("SRT BWE: in cooldown (%.1fs since loss), holding at %d Kbps",
-			now.Sub(s.lastLossTime).Seconds(), s.targetBitrate/1000)
 		return s.targetBitrate
 	}
 
 	// Additive increase when stable
 	if s.targetBitrate < maxBitrateBps {
-		oldBitrate := s.targetBitrate
 		s.targetBitrate += bweIncreaseBps
 		if s.targetBitrate > maxBitrateBps {
 			s.targetBitrate = maxBitrateBps
 		}
-		log.Printf("SRT BWE: probe +%d Kbps -> %d Kbps",
-			bweIncreaseBps/1000, s.targetBitrate/1000)
-		_ = oldBitrate // silence unused warning
 	}
 
 	return s.targetBitrate
