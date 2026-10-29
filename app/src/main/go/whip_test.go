@@ -310,6 +310,8 @@ func TestWHIPSink_Reconnects(t *testing.T) {
 	}
 	defer sink.Close()
 
+	sink.WriteH264(append(nal(0x67, 10), nal(0x68, 4)...), 0) // cached for later IDRs
+
 	// Kill the server side; the sink must notice, DELETE the old resource and re-POST.
 	srv.pcs.Range(func(k, _ any) bool { k.(*webrtc.PeerConnection).Close(); return true })
 
@@ -320,8 +322,22 @@ func TestWHIPSink_Reconnects(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if _, err := sink.WriteH264(nal(0x65, 100), 0); err != nil {
-		t.Errorf("WriteH264 after reconnect: %v", err)
+	// An IDR alone must still be preceded by the SPS/PPS cached before the drop
+	// (aggregated into a STAP-A, NAL type 24).
+	timeout := time.After(10 * time.Second)
+	for {
+		if _, err := sink.WriteH264(nal(0x65, 100), 0); err != nil {
+			t.Fatalf("WriteH264 after reconnect: %v", err)
+		}
+		select {
+		case p := <-srv.packets:
+			if p.Payload[0]&0x1F == 24 {
+				return
+			}
+		case <-timeout:
+			t.Fatal("no SPS/PPS sent after reconnect")
+		case <-time.After(50 * time.Millisecond):
+		}
 	}
 }
 

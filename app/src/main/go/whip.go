@@ -426,6 +426,13 @@ func (s *WHIPSink) reconnect(old *whipConn) {
 	for {
 		c, err := s.connect()
 		if err == nil {
+			// Encoders may emit SPS/PPS only once, so carry them over.
+			if len(old.tracks) > 0 && len(c.tracks) > 0 {
+				o, n := old.tracks[0], c.tracks[0]
+				o.mu.Lock()
+				n.sps, n.pps = o.sps, o.pps
+				o.mu.Unlock()
+			}
 			s.install(c)
 			log.Printf("WHIP reconnection successful")
 			return
