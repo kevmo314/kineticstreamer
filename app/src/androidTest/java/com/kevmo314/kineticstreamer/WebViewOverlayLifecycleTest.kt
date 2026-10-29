@@ -68,6 +68,17 @@ class WebViewOverlayLifecycleTest {
     }
 
     @Test
+    fun rendererSetOverlayWithOverlayIdsDoesNotClobberTexture() {
+        assertTrue(overlay.initialize("about:blank", 0, 0, 320, 180))
+        val id = renderer.overlayTextureId
+        // What StreamingService does after initialize/update.
+        renderer.setOverlay(overlay.getTextureId(), overlay.getSurfaceTexture(), 0, 0, 320, 180, 1920, 1080)
+        drainMainAndGl()
+        assertTrue(id > 0)
+        assertEquals(id, renderer.overlayTextureId)
+    }
+
+    @Test
     fun releaseDropsTheTextureAndIsIdempotent() {
         assertTrue(overlay.initialize("about:blank", 0, 0, 320, 180))
         val texture = overlay.getSurfaceTexture()!!
