@@ -42,8 +42,4 @@ class RISTSink(url: String, mimeTypes: String) : Closeable {
             nativeHandle = 0L
         }
     }
-
-    protected fun finalize() {
-        close()
-    }
 }

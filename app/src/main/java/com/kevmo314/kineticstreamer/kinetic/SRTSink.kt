@@ -59,10 +59,6 @@ class SRTSink(url: String, mimeTypes: String) : Closeable {
 
     private external fun close(handle: Long)
 
-    protected fun finalize() {
-        close()
-    }
-
     companion object {
         // MediaCodec flags that might be used
         const val BUFFER_FLAG_KEY_FRAME = 1

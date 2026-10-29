@@ -94,10 +94,6 @@ class WHIPSink(url: String, token: String, mimeTypes: String) : Closeable {
         return if (nativeHandle != 0L) getPeerConnectionState(nativeHandle) else "unknown"
     }
 
-    protected fun finalize() {
-        close()
-    }
-
     companion object {
         // MediaCodec flags that might be used
         const val BUFFER_FLAG_KEY_FRAME = 1

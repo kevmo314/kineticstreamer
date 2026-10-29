@@ -1,35 +1,40 @@
 package com.kevmo314.kineticstreamer
 
 import android.content.Context
-import android.graphics.PixelFormat
 import android.graphics.SurfaceTexture
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import android.view.Gravity
-import android.view.WindowManager
+import android.view.View
+import android.webkit.ConsoleMessage
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
-import androidx.annotation.RequiresApi
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Manages a WebView that renders to an OpenGL texture for overlaying on video
- * Uses SurfaceControl API for hardware-accelerated WebGL support (Android 10+)
- * Requires hardware acceleration - no fallback to software rendering
+ * Manages a WebView rendered into a renderer-owned SurfaceTexture for overlaying on video.
+ * The WebView is hosted on a VirtualDisplay so hardware acceleration (WebGL) keeps working.
  */
 class WebViewOverlay(private val context: Context) {
     companion object {
         private const val TAG = "WebViewOverlay"
     }
 
+    // The WebView, its container and the capture are only touched on the main thread.
     private var webView: WebView? = null
     private var containerView: FrameLayout? = null
-    private var windowManager: WindowManager? = null
     private var surfaceCapture: WebViewSurfaceCapture? = null
-    private var textureView: android.view.TextureView? = null
     private var renderer: SurfaceTextureRenderer? = null
+
+    @Volatile
+    private var overlayTexture: SurfaceTexture? = null
 
     // Overlay configuration
     private var overlayX: Int = 0
@@ -39,12 +44,11 @@ class WebViewOverlay(private val context: Context) {
     private var overlayScale: Float = 1.0f
     private var currentUrl: String? = null
 
-    // Handler for WebView operations (must be on UI thread)
     private val mainHandler = Handler(Looper.getMainLooper())
 
     /**
-     * Initialize the overlay with specified parameters
-     * Requires hardware acceleration - will fail if not available
+     * Initialize the overlay with specified parameters. Any previous WebView is torn down first.
+     * Blocks until the WebView is set up on the main thread.
      */
     fun initialize(url: String, x: Int, y: Int, width: Int, height: Int, scale: Float = 1.0f): Boolean {
         Log.i(TAG, "initialize() called with url=$url, x=$x, y=$y, width=$width, height=$height, scale=$scale")
@@ -55,153 +59,105 @@ class WebViewOverlay(private val context: Context) {
         overlayScale = scale
         currentUrl = url
 
-        // Initialize with hardware acceleration (required)
-        return initializeWithSurfaceControl(url)
-    }
-
-    /**
-     * Initialize using SurfaceControl for hardware acceleration (Android 10+)
-     */
-    private fun initializeWithSurfaceControl(url: String): Boolean {
-        // If already on main thread, run directly to avoid deadlock
         if (Looper.myLooper() == Looper.getMainLooper()) {
             return initializeOnMainThread(url)
         }
 
-        // Otherwise, post to main thread and wait
-        var success = false
-        val latch = java.util.concurrent.CountDownLatch(1)
-
+        val success = AtomicBoolean(false)
+        val latch = CountDownLatch(1)
         mainHandler.post {
-            success = initializeOnMainThread(url)
+            success.set(initializeOnMainThread(url))
             latch.countDown()
         }
-
-        try {
-            latch.await(5, java.util.concurrent.TimeUnit.SECONDS)
+        return try {
+            latch.await(5, TimeUnit.SECONDS) && success.get()
         } catch (e: InterruptedException) {
-            Log.e(TAG, "Initialization timeout", e)
-            return false
+            Thread.currentThread().interrupt()
+            false
         }
-
-        return success
     }
 
     private fun initializeOnMainThread(url: String): Boolean {
+        teardownOnMainThread()
+        val gl = renderer
         try {
-                // Create container for WebView
-                containerView = FrameLayout(context).apply {
-                    layoutParams = FrameLayout.LayoutParams(overlayWidth, overlayHeight)
-                }
+            val container = FrameLayout(context).apply {
+                layoutParams = FrameLayout.LayoutParams(overlayWidth, overlayHeight)
+            }
+            val view = createWebView()
+            container.addView(view)
+            containerView = container
+            webView = view
 
-                // Create WebView with hardware acceleration
-                webView = WebView(context).apply {
-                    layoutParams = FrameLayout.LayoutParams(overlayWidth, overlayHeight)
+            view.measure(
+                View.MeasureSpec.makeMeasureSpec(overlayWidth, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(overlayHeight, View.MeasureSpec.EXACTLY)
+            )
+            view.layout(0, 0, overlayWidth, overlayHeight)
 
-                    // Force hardware acceleration (critical for WebGL)
-                    setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
+            // The texture must be created on the renderer's GL thread, which also owns it.
+            val texture = checkNotNull(gl) { "No renderer" }.createOverlayTexture(overlayWidth, overlayHeight)
+            overlayTexture = texture
+            surfaceCapture = WebViewSurfaceCapture(context, overlayWidth, overlayHeight, texture)
+            gl.setOverlayBounds(overlayX, overlayY, overlayWidth, overlayHeight, 1920, 1080)
 
-                    // Configure for WebGL support
-                    settings.apply {
-                        javaScriptEnabled = true
-                        domStorageEnabled = true
-                        databaseEnabled = true
-                        loadWithOverviewMode = true
-                        useWideViewPort = true
-                        setSupportZoom(false)
-                        displayZoomControls = false
-                        builtInZoomControls = false
-
-                        // Enable all features needed for WebGL
-                        allowFileAccess = true
-                        allowContentAccess = true
-                        allowFileAccessFromFileURLs = true
-                        allowUniversalAccessFromFileURLs = true
-                        javaScriptCanOpenWindowsAutomatically = true
-
-                        // Mixed content
-                        mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-
-                        // Performance
-                        setRenderPriority(android.webkit.WebSettings.RenderPriority.HIGH)
-                        mediaPlaybackRequiresUserGesture = false
-                        cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
-
-                        // Enable hardware acceleration settings
-                        setGeolocationEnabled(false)
-                    }
-
-                    // Apply scale
-                    setInitialScale((overlayScale * 100).toInt())
-
-                    // Transparent background
-                    setBackgroundColor(0x00000000)
-
-                    // WebView client
-                    webViewClient = object : WebViewClient() {
-                        override fun onPageFinished(view: WebView?, url: String?) {
-                            super.onPageFinished(view, url)
-                            Log.i(TAG, "WebView page loaded: $url")
-
-                            view?.let { view -> surfaceCapture?.startCapture(view) }
-                        }
-
-                        override fun onReceivedError(view: WebView?, errorCode: Int, description: String?, failingUrl: String?) {
-                            Log.e(TAG, "WebView error: $errorCode - $description at $failingUrl")
-                        }
-                    }
-
-                    // Chrome client for console logging
-                    webChromeClient = object : android.webkit.WebChromeClient() {
-                        override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage?): Boolean {
-                            consoleMessage?.let { msg ->
-                                val logMessage = "JS Console: ${msg.message()} [${msg.sourceId()}:${msg.lineNumber()}]"
-                                when (msg.messageLevel()) {
-                                    android.webkit.ConsoleMessage.MessageLevel.ERROR -> Log.e(TAG, logMessage)
-                                    android.webkit.ConsoleMessage.MessageLevel.WARNING -> Log.w(TAG, logMessage)
-                                    else -> Log.d(TAG, logMessage)
-                                }
-                            }
-                            return true
-                        }
-                    }
-                }
-
-                // Add WebView to container (will be moved to VirtualDisplay later)
-                containerView?.addView(webView)
-
-                // Force WebView to measure and layout with explicit dimensions
-                webView?.measure(
-                    android.view.View.MeasureSpec.makeMeasureSpec(overlayWidth, android.view.View.MeasureSpec.EXACTLY),
-                    android.view.View.MeasureSpec.makeMeasureSpec(overlayHeight, android.view.View.MeasureSpec.EXACTLY)
-                )
-                webView?.layout(0, 0, overlayWidth, overlayHeight)
-
-                // Note: WebView will be rendered in VirtualDisplay Presentation
-                // No WindowManager overlay needed for VirtualDisplay approach
-
-                // Load URL after view is attached
-                webView?.loadUrl(url)
-
-                // Create overlay texture on GL thread via renderer (must have valid GL context)
-                val overlaySurfaceTexture = renderer?.createOverlayTexture(overlayWidth, overlayHeight)
-                Log.i(TAG, "Created overlay texture via renderer: $overlaySurfaceTexture")
-
-                // Initialize surface capture with the renderer-created SurfaceTexture
-                surfaceCapture = WebViewSurfaceCapture()
-                surfaceCapture?.initialize(overlayWidth, overlayHeight, context, overlaySurfaceTexture)
-                Log.i(TAG, "Surface capture initialized with external SurfaceTexture")
-
-                Log.i(TAG, "Initialized with SurfaceControl for hardware acceleration")
-
-                // Set overlay bounds on renderer
-                renderer?.setOverlayBounds(overlayX, overlayY, overlayWidth, overlayHeight, 1920, 1080)
-
+            view.loadUrl(url)
             return true
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to initialize with SurfaceControl", e)
-            cleanup()
+            Log.e(TAG, "Failed to initialize WebView overlay", e)
+            teardownOnMainThread()
             return false
+        }
+    }
+
+    private fun createWebView(): WebView = WebView(context).apply {
+        layoutParams = FrameLayout.LayoutParams(overlayWidth, overlayHeight)
+        // Hardware layer is critical for WebGL
+        setLayerType(View.LAYER_TYPE_HARDWARE, null)
+
+        settings.apply {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            setSupportZoom(false)
+            displayZoomControls = false
+            builtInZoomControls = false
+            javaScriptCanOpenWindowsAutomatically = true
+            mediaPlaybackRequiresUserGesture = false
+            cacheMode = WebSettings.LOAD_DEFAULT
+
+            // Overlays are remote pages; never expose local files or content providers to them.
+            allowFileAccess = false
+            allowContentAccess = false
+            allowFileAccessFromFileURLs = false
+            allowUniversalAccessFromFileURLs = false
+            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+            setGeolocationEnabled(false)
+        }
+
+        setInitialScale((overlayScale * 100).toInt())
+        setBackgroundColor(0x00000000)
+
+        webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView, url: String?) {
+                Log.i(TAG, "WebView page loaded: $url")
+                surfaceCapture?.startCapture(view)
+            }
+
+            override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+                Log.e(TAG, "WebView error: ${error.errorCode} - ${error.description} at ${request.url}")
+            }
+        }
+
+        webChromeClient = object : WebChromeClient() {
+            override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
+                val logMessage = "JS Console: ${consoleMessage.message()} [${consoleMessage.sourceId()}:${consoleMessage.lineNumber()}]"
+                when (consoleMessage.messageLevel()) {
+                    ConsoleMessage.MessageLevel.ERROR -> Log.e(TAG, logMessage)
+                    ConsoleMessage.MessageLevel.WARNING -> Log.w(TAG, logMessage)
+                    else -> Log.d(TAG, logMessage)
+                }
+                return true
+            }
         }
     }
 
@@ -226,28 +182,13 @@ class WebViewOverlay(private val context: Context) {
             }
         }
 
+        val w = overlayWidth
+        val h = overlayHeight
         if (sizeChanged) {
-            // Update window size for SurfaceControl approach
             mainHandler.post {
-                containerView?.layoutParams = FrameLayout.LayoutParams(overlayWidth, overlayHeight)
-                webView?.layoutParams = FrameLayout.LayoutParams(overlayWidth, overlayHeight)
+                containerView?.layoutParams = FrameLayout.LayoutParams(w, h)
+                webView?.layoutParams = FrameLayout.LayoutParams(w, h)
                 webView?.requestLayout()
-
-                // Update window manager params - create new params as width/height are val
-                val currentParams = containerView?.layoutParams as? WindowManager.LayoutParams
-                if (currentParams != null && containerView != null) {
-                    val newParams = WindowManager.LayoutParams(
-                        overlayWidth,
-                        overlayHeight,
-                        currentParams.type,
-                        currentParams.flags,
-                        currentParams.format
-                    )
-                    newParams.gravity = currentParams.gravity
-                    newParams.x = currentParams.x
-                    newParams.y = currentParams.y
-                    windowManager?.updateViewLayout(containerView, newParams)
-                }
             }
         }
 
@@ -255,7 +196,7 @@ class WebViewOverlay(private val context: Context) {
             if (overlayScale != it) {
                 overlayScale = it
                 mainHandler.post {
-                    webView?.setInitialScale((overlayScale * 100).toInt())
+                    webView?.setInitialScale((it * 100).toInt())
                     webView?.reload()
                 }
             }
@@ -264,115 +205,66 @@ class WebViewOverlay(private val context: Context) {
         url?.let { newUrl ->
             if (newUrl != currentUrl) {
                 currentUrl = newUrl
-                mainHandler.post {
-                    webView?.loadUrl(newUrl)
-                }
+                mainHandler.post { webView?.loadUrl(newUrl) }
             }
         }
 
-        // Update renderer bounds if position or size changed
         renderer?.setOverlayBounds(overlayX, overlayY, overlayWidth, overlayHeight, 1920, 1080)
-
-        Log.i(TAG, "WebViewOverlay updated - Position: ($overlayX, $overlayY), Size: ${overlayWidth}x${overlayHeight}")
     }
 
     /**
-     * Set the renderer reference for updating overlay
+     * Set the renderer that owns the overlay texture
      */
     fun setRenderer(renderer: SurfaceTextureRenderer?) {
         this.renderer = renderer
     }
 
-    /**
-     * Update the renderer with the current overlay configuration
-     */
-    private fun updateRendererOverlay() {
-        val textureId = surfaceCapture?.getTextureId() ?: 0
-        val surfaceTexture = surfaceCapture?.getSurfaceTexture()
+    /** The renderer's GL texture id for the overlay, or 0 if there is none. */
+    fun getTextureId(): Int = if (overlayTexture != null) renderer?.overlayTextureId ?: 0 else 0
 
-        Log.i(TAG, "Updating renderer overlay: textureId=$textureId, surfaceTexture=$surfaceTexture")
-
-        // Set up frame available listener for overlay texture
-        surfaceTexture?.setOnFrameAvailableListener {
-            // Notify renderer that a new overlay frame is available
-            renderer?.setOverlayFrameAvailable()
-        }
-
-        renderer?.setOverlay(
-            textureId,
-            surfaceTexture,
-            overlayX,
-            overlayY,
-            overlayWidth,
-            overlayHeight,
-            1920,  // screen width
-            1080   // screen height
-        )
-    }
-
-    /**
-     * Get the texture ID for rendering
-     */
-    fun getTextureId(): Int {
-        val id = surfaceCapture?.getTextureId() ?: 0
-        Log.d(TAG, "getTextureId() returning $id")
-        return id
-    }
-
-    /**
-     * Get the SurfaceTexture - returns null as we use direct texture rendering
-     */
-    fun getSurfaceTexture(): SurfaceTexture? {
-        // Return the SurfaceTexture from the capture if available
-        val surfaceTexture = surfaceCapture?.getSurfaceTexture()
-        Log.d(TAG, "getSurfaceTexture() returning $surfaceTexture")
-        return surfaceTexture
-    }
-
-    /**
-     * Refresh the WebView rendering to texture
-     */
-    fun refreshRender() {
-        webView?.postInvalidateOnAnimation()
-    }
+    /** The overlay SurfaceTexture, or null if the overlay is not initialized or was released. */
+    fun getSurfaceTexture(): SurfaceTexture? = overlayTexture
 
     /**
      * Reload the WebView content
      */
     fun reload() {
-        mainHandler.post {
-            webView?.reload()
-            Log.i(TAG, "WebView reload triggered")
-        }
+        mainHandler.post { webView?.reload() }
     }
 
     /**
-     * Clean up resources
+     * Tear down the WebView and capture, then have the renderer release the overlay texture.
+     * Must run on the main thread. Safe to call repeatedly.
      */
-    private fun cleanup() {
+    private fun teardownOnMainThread() {
         surfaceCapture?.release()
         surfaceCapture = null
 
-        mainHandler.post {
-            // Clean up container and WebView
-            containerView?.removeAllViews()
-            containerView = null
+        containerView?.removeAllViews()
+        containerView = null
 
-            webView?.apply {
-                stopLoading()
-                clearHistory()
-                clearCache(true)
-                destroy()
-            }
-            webView = null
+        webView?.apply {
+            stopLoading()
+            destroy()
+        }
+        webView = null
+
+        // The capture's Surface is gone, so the renderer can now release the SurfaceTexture.
+        if (overlayTexture != null) {
+            overlayTexture = null
+            renderer?.removeOverlay()
         }
     }
 
     /**
-     * Release all resources
+     * Release all resources. Safe to call from any thread.
      */
     fun release() {
-        cleanup()
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            teardownOnMainThread()
+        } else {
+            mainHandler.post { teardownOnMainThread() }
+        }
         Log.i(TAG, "WebViewOverlay released")
     }
 }

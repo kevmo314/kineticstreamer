@@ -17,7 +17,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Card
-import androidx.compose.material3.Divider
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
@@ -151,7 +151,7 @@ fun DeviceSelector(
                         )
                     }
 
-                    Divider(modifier = Modifier.padding(vertical = 16.dp))
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
 
                     // Audio Devices Section
                     Text(
@@ -211,7 +211,7 @@ fun DeviceSelector(
                     }
                 }
 
-                Divider()
+                HorizontalDivider()
 
                 TextButton(
                     onClick = onDismissRequest,
