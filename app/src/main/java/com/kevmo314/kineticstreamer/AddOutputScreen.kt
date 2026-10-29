@@ -36,6 +36,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.core.net.toUri
 import androidx.navigation.NavGraphBuilder
 import androidx.navigation.compose.composable
 import kotlinx.coroutines.CoroutineScope
@@ -65,7 +66,7 @@ enum class OutputType(
 
 /** Splits a stored `whip://endpoint?token=...` url into (endpoint, token), keeping any other query params. */
 internal fun parseWhipUrl(url: String): Pair<String, String> {
-    val uri = Uri.parse(url.removePrefix("whip://"))
+    val uri = url.removePrefix("whip://").toUri()
     val token = uri.getQueryParameter("token") ?: ""
     val endpoint = uri.buildUpon().clearQuery().apply {
         uri.queryParameterNames.filter { it != "token" }.forEach { appendQueryParameter(it, uri.getQueryParameter(it)) }
@@ -81,7 +82,7 @@ internal fun buildWhipUrl(endpoint: String, token: String): String = when {
 
 /** Returns (host, port, query param [key]) for `scheme://host:port?key=value`. */
 private fun parseHostPortParam(url: String, key: String, defaultPort: String): Triple<String, String, String> {
-    val uri = Uri.parse(url)
+    val uri = url.toUri()
     return Triple(
         uri.host ?: "",
         uri.port.takeIf { it > 0 }?.toString() ?: defaultPort,

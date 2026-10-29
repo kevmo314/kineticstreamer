@@ -1,6 +1,7 @@
 package com.kevmo314.kineticstreamer
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -57,6 +58,8 @@ val REQUIRED_PERMISSIONS = listOf(
 )
 
 // Notifications are requested too, but only camera and mic gate the app.
+// The constant is just a string, so it is safe below API 33 (the request is simply denied).
+@SuppressLint("InlinedApi")
 val REQUESTED_PERMISSIONS = REQUIRED_PERMISSIONS + Manifest.permission.POST_NOTIFICATIONS
 
 private data class StreamStats(val bitrate: Int, val fps: Float, val ice: String, val peer: String)
