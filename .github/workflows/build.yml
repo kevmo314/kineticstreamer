@@ -36,6 +36,9 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4.0.1
+        with:
+          # The default also installs the removed 'tools' package, which now fails.
+          packages: platform-tools
 
       - name: Setup Android NDK
         id: setup-ndk
