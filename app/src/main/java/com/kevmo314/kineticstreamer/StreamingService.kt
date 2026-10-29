@@ -12,10 +12,7 @@ import android.content.pm.PackageManager
 import android.hardware.camera2.CameraManager
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
-import android.media.AudioAttributes
 import android.media.AudioFormat
-import android.media.AudioManager
-import android.media.AudioTrack
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaCodecList
@@ -24,6 +21,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
+import android.os.RemoteCallbackList
 import android.os.Looper
 import android.widget.Toast
 import android.os.PowerManager
@@ -43,6 +41,7 @@ import android.os.Bundle
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -63,6 +62,8 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 
 
@@ -80,39 +81,34 @@ class StreamingService : Service() {
 
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
-                ACTION_USB_PERMISSION -> {
-                    synchronized(this) {
-                        val device: UsbDevice? = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
-                        if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
-                            context.startService(Intent(context, StreamingService::class.java).apply {
-                                action = ACTION_SET_USB_DEVICE
-                                putExtra(EXTRA_USB_DEVICE, device)
-                            })
-                        }
-                    }
-                }
                 UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
                     val device: UsbDevice? = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
                     Log.i("UsbReceiver", "USB device attached: ${device?.productName}")
-
-                    // Check if it's a UVC camera and auto-open is enabled
-                    if (device != null && device.isUvc()) {
-                        val settings = Settings(DataStoreProvider.getDataStore(context))
-                        val autoOpen = runBlocking {
-                            settings.autoOpenOnUsbCamera.first()
-                        }
-                        if (autoOpen) {
-                            Log.i("UsbReceiver", "Auto-opening app for UVC camera: ${device.productName}")
-                            context.startActivity(Intent(context, MainActivity::class.java).apply {
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                            })
-                        }
-                    }
 
                     // Trigger device refresh to attempt reconnection
                     context.startService(Intent(context, StreamingService::class.java).apply {
                         action = ACTION_USB_DEVICE_CHANGED
                     })
+
+                    // Check if it's a UVC camera and auto-open is enabled. DataStore is read off
+                    // the main thread; goAsync keeps the receiver alive until it's done.
+                    if (device != null && device.isUvc()) {
+                        val pending = goAsync()
+                        val appContext = context.applicationContext
+                        CoroutineScope(Dispatchers.IO).launch {
+                            try {
+                                val settings = Settings(DataStoreProvider.getDataStore(appContext))
+                                if (settings.autoOpenOnUsbCamera.first()) {
+                                    Log.i("UsbReceiver", "Auto-opening app for UVC camera: ${device.productName}")
+                                    appContext.startActivity(Intent(appContext, MainActivity::class.java).apply {
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                                    })
+                                }
+                            } finally {
+                                pending.finish()
+                            }
+                        }
+                    }
                 }
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                     val device: UsbDevice? = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
@@ -126,7 +122,19 @@ class StreamingService : Service() {
         }
     }
 
-    // AudioRecord no longer used - audio comes from AudioSource flow
+    /** Not exported: only receives the PendingIntent MainActivity hands to UsbManager.requestPermission. */
+    class UsbPermissionReceiver : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action != UsbReceiver.ACTION_USB_PERMISSION) return
+            val device: UsbDevice? = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+            if (device != null && intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
+                context.startService(Intent(context, StreamingService::class.java).apply {
+                    action = ACTION_SET_USB_DEVICE
+                    putExtra(EXTRA_USB_DEVICE, device)
+                })
+            }
+        }
+    }
 
     private var videoEncoderInputSurface: Surface? = null
     private var videoEncoder: MediaCodec? = null
@@ -134,6 +142,15 @@ class StreamingService : Service() {
     private var previewSurface: Surface? = null
 
     private var audioEncoder: MediaCodec? = null
+    private var videoThread: HandlerThread? = null
+    private var audioThread: HandlerThread? = null
+    // Serialises startStreaming/stopStreaming/onDestroy, which arrive on different threads.
+    private val lifecycleLock = Any()
+    @Volatile private var streaming = false
+    private val audioFeeder = AudioFeeder()
+    // Codec input buffers waiting for PCM; fed as soon as audio arrives instead of polling.
+    private val audioInputLock = Any()
+    private val freeAudioInputs = ArrayDeque<Int>()
     private var settings: Settings? = null
     private var deviceFlowJob: Job? = null
     private var renderer: SurfaceTextureRenderer? = null
@@ -146,15 +163,16 @@ class StreamingService : Service() {
     private var videoFrameCount: Long = 0 // Counter for debug logging
     private var useOpusAudio: Boolean = true // Track audio codec: true=Opus (WHIP), false=AAC (SRT)
     private var audioFlowJob: Job? = null
-    private var audioLevelCallback: IAudioLevelCallback? = null
+    private val audioLevelCallbacks = RemoteCallbackList<IAudioLevelCallback>()
+    private var registeredLevelCallback: IAudioLevelCallback? = null
+    private val audioLevels = FloatArray(12) // reused per chunk; only touched on the audio thread
     
     // FPS tracking - circular buffer for last 3 seconds of frame timestamps
     private val frameTimestamps = mutableListOf<Long>()
     private var latestFps: Float = 0f
     // Separate coroutine scopes for video and audio processing on IO dispatcher
-    private val videoScope = CoroutineScope(Dispatchers.IO + Job())
-    private val audioScope = CoroutineScope(Dispatchers.IO + Job())
-    private var debugAudioTrack: AudioTrack? = null // For debugging UAC audio playback
+    private val videoScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val audioScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
 
@@ -169,8 +187,6 @@ class StreamingService : Service() {
     
     // Timestamp synchronization
     private var streamStartTimeNanos: Long = 0
-    private var audioSampleCount: Long = 0
-    private var audioEncoderSampleCount: Long = 0 // Samples actually sent to encoder
     private var lastVideoTimestampNanos: Long = 0
 
     private val binder = object : IStreamingService.Stub() {
@@ -191,100 +207,49 @@ class StreamingService : Service() {
         }
 
         override fun startStreaming(config: StreamingConfiguration) {
-            // Update notification to show streaming status
-            updateNotification("Streaming active", true)
-            
-            // Check if already streaming
-            if (videoEncoder != null || audioEncoder != null) {
-                Log.w("StreamingService", "Already streaming")
-                return
-            }
-            
-            // Store configuration
-            // TODO: Initialize WHIP sink when endpoint configuration is available
-            // For now, WHIP sink needs to be initialized with hardcoded values or from settings
-            
-            // Initialize timestamp synchronization FIRST
-            streamStartTimeNanos = System.nanoTime()
-            audioSampleCount = 0
-            audioEncoderSampleCount = 0
-            audioBufferQueue.clear()
-            audioBufferRemainder = ByteArray(0)
-            audioBufferTimestampNanos = 0
-            lastVideoTimestampNanos = 0
-            videoFrameCount = 0
-            lastBitrate = 0
-            Log.i("StreamingService", "Stream started at nanos: $streamStartTimeNanos")
-            
-            // Setup and start encoders (they'll use the initialized timestamps)
-            try {
-                setupEncoders()
-            } catch (e: Exception) {
-                Log.e("StreamingService", "Failed to start streaming: ${e.message}", e)
-                Handler(Looper.getMainLooper()).post {
-                    Toast.makeText(this@StreamingService, "Streaming failed: ${e.message}", Toast.LENGTH_LONG).show()
+            synchronized(lifecycleLock) {
+                if (streaming) {
+                    Log.w("StreamingService", "Already streaming")
+                    return
                 }
-                stopStreaming()
-                return
+
+                // Initialize timestamp synchronization FIRST
+                streamStartTimeNanos = System.nanoTime()
+                audioFeeder.reset()
+                synchronized(audioInputLock) { freeAudioInputs.clear() }
+                lastVideoTimestampNanos = 0
+                videoFrameCount = 0
+                lastBitrate = 0
+                Log.i("StreamingService", "Stream started at nanos: $streamStartTimeNanos")
+
+                try {
+                    setupEncoders()
+                    // Pass stream start time to renderer for wall-clock timestamp sync
+                    renderer?.streamStartTimeNanos = streamStartTimeNanos
+                    renderer?.addOutputSurface(videoEncoderInputSurface)
+                } catch (e: Exception) {
+                    Log.e("StreamingService", "Failed to start streaming: ${e.message}", e)
+                    Handler(Looper.getMainLooper()).post {
+                        Toast.makeText(this@StreamingService, "Streaming failed: ${e.message}", Toast.LENGTH_LONG).show()
+                    }
+                    teardownStreaming()
+                    return
+                }
+                streaming = true
+                updateNotification("Streaming active", true)
+                Log.i("StreamingService", "Encoders initialized and streaming active")
             }
-            Log.i("StreamingService", "Encoders initialized and started")
-
-            // Pass stream start time to renderer for wall-clock timestamp sync
-            renderer?.streamStartTimeNanos = streamStartTimeNanos
-
-            // Initialize renderer and launch flows
-            renderer?.addOutputSurface(videoEncoderInputSurface)
-            Log.i("StreamingService", "Flows launched and streaming active")
         }
 
         override fun stopStreaming() {
-            // Update notification to show stopped status
-            updateNotification("Ready to stream", false)
-
-            // Reset timestamp tracking
-            streamStartTimeNanos = 0
-            renderer?.streamStartTimeNanos = 0
-            audioSampleCount = 0
-            lastVideoTimestampNanos = 0
-
-            // Reset FPS tracking
-            frameTimestamps.clear()
-            latestFps = 0f
-
-            // Clear RTMP source reference
-            rtmpSourceRef.set(null)
-
-            // Remove encoder surface from renderer (keep preview surface and overlay)
-
-            // Stop and release video encoder
-            videoEncoder?.stop()
-            videoEncoderInputSurface?.release()
-            videoEncoderInputSurface = null
-            videoEncoder?.release()
-            videoEncoder = null
-
-            // Stop and release audio encoder
-            audioEncoder?.stop()
-            audioEncoder?.release() 
-            audioEncoder = null
-            
-            // Clean up sinks
-            whipSink?.close()
-            whipSink = null
-            srtSink?.close()
-            srtSink = null
-            ristSink?.close()
-            ristSink = null
-
-            // Clean up queue
-            networkExecutor?.shutdown()
-            networkExecutor = null
-            
-            Log.i("StreamingService", "Streaming stopped and resources cleaned up")
+            synchronized(lifecycleLock) {
+                teardownStreaming()
+                updateNotification("Ready to stream", false)
+            }
         }
 
         override fun isStreaming(): Boolean {
-            return videoEncoder != null || audioEncoder != null
+            return streaming
         }
         
         override fun getCurrentBitrate(): Int {
@@ -296,7 +261,11 @@ class StreamingService : Service() {
         }
         
         override fun setAudioLevelCallback(callback: IAudioLevelCallback?) {
-            audioLevelCallback = callback
+            synchronized(audioLevelCallbacks) {
+                registeredLevelCallback?.let { audioLevelCallbacks.unregister(it) }
+                registeredLevelCallback = callback
+                callback?.let { audioLevelCallbacks.register(it) }
+            }
         }
         
         override fun setWebViewOverlay(url: String?, x: Int, y: Int, width: Int, height: Int) {
@@ -306,7 +275,7 @@ class StreamingService : Service() {
             }
 
             if (webViewOverlay == null) {
-                webViewOverlay = WebViewOverlay(applicationContext)
+                webViewOverlay = WebViewOverlay(applicationContext).also { it.setRenderer(renderer) }
             }
             
             val success = webViewOverlay?.initialize(url, x, y, width, height) ?: false
@@ -360,6 +329,71 @@ class StreamingService : Service() {
 
         override fun getWhipPeerConnectionState(): String {
             return whipSink?.getPeerConnectionState() ?: "none"
+        }
+    }
+
+    /**
+     * Releases everything startStreaming may have created. Each step is isolated so one failure
+     * can't skip the rest; also serves as the rollback for a partial start. Order: encoders ->
+     * drain the network executor -> close sinks.
+     */
+    private fun teardownStreaming() {
+        streaming = false
+        streamStartTimeNanos = 0
+        renderer?.streamStartTimeNanos = 0
+        lastVideoTimestampNanos = 0
+        synchronized(frameTimestamps) { frameTimestamps.clear() }
+        latestFps = 0f
+        rtmpSourceRef.set(null)
+
+        // Stop the GL thread drawing into the encoder surface before it is released
+        val inputSurface = videoEncoderInputSurface
+        runCatching { renderer?.removeOutputSurface(inputSurface) }
+        videoEncoder?.let { codec ->
+            runCatching { codec.stop() }
+            runCatching { codec.release() }
+        }
+        videoEncoder = null
+        runCatching { inputSurface?.release() }
+        videoEncoderInputSurface = null
+
+        audioEncoder?.let { codec ->
+            runCatching { codec.stop() }
+            runCatching { codec.release() }
+        }
+        audioEncoder = null
+        synchronized(audioInputLock) { freeAudioInputs.clear() }
+        audioFeeder.reset()
+
+        videoThread?.quitSafely()
+        videoThread = null
+        audioThread?.quitSafely()
+        audioThread = null
+
+        // Let queued writes finish before the sinks go away
+        networkExecutor?.let { executor ->
+            runCatching {
+                executor.shutdown()
+                if (!executor.awaitTermination(2, TimeUnit.SECONDS)) executor.shutdownNow()
+            }
+        }
+        networkExecutor = null
+
+        runCatching { whipSink?.close() }
+        whipSink = null
+        runCatching { srtSink?.close() }
+        srtSink = null
+        runCatching { ristSink?.close() }
+        ristSink = null
+
+        Log.i("StreamingService", "Streaming stopped and resources cleaned up")
+    }
+
+    private fun writeAsync(block: () -> Unit) {
+        try {
+            networkExecutor?.execute(block)
+        } catch (e: RejectedExecutionException) {
+            // Stopping
         }
     }
 
@@ -477,11 +511,7 @@ class StreamingService : Service() {
                             }
                         })
                     } catch (e: Exception) {
-                        Log.e("StreamingService", "Failed to create SRT sink: ${e.message}", e)
-                        Handler(Looper.getMainLooper()).post {
-                            Toast.makeText(this@StreamingService, "SRT connection failed: ${e.message}", Toast.LENGTH_LONG).show()
-                        }
-                        return
+                        throw IllegalStateException("SRT connection failed: ${e.message}", e)
                     }
                 }
                 config.url.startsWith("rist://") -> {
@@ -489,11 +519,7 @@ class StreamingService : Service() {
                     try {
                         ristSink = RISTSink(config.url, mimeTypes)
                     } catch (e: Exception) {
-                        Log.e("StreamingService", "Failed to create RIST sink: ${e.message}", e)
-                        Handler(Looper.getMainLooper()).post {
-                            Toast.makeText(this@StreamingService, "RIST connection failed: ${e.message}", Toast.LENGTH_LONG).show()
-                        }
-                        return
+                        throw IllegalStateException("RIST connection failed: ${e.message}", e)
                     }
                 }
                 config.url.startsWith("whip://") || config.url.startsWith("https://") || config.url.startsWith("http://") -> {
@@ -523,12 +549,7 @@ class StreamingService : Service() {
                             }
                         })
                     } catch (e: Exception) {
-                        Log.e("StreamingService", "Failed to create WHIP sink: ${e.message}", e)
-                        Handler(Looper.getMainLooper()).post {
-                            Toast.makeText(this@StreamingService, "WHIP connection failed: ${e.message}", Toast.LENGTH_LONG).show()
-                        }
-                        // Clean up and return - don't start streaming without a working sink
-                        return
+                        throw IllegalStateException("WHIP connection failed: ${e.message}", e)
                     }
                 }
                 else -> {
@@ -549,9 +570,15 @@ class StreamingService : Service() {
             throw IllegalStateException("No video encoder found for ${videoMediaFormat.getString(MediaFormat.KEY_MIME)}")
         }
         Log.i("StreamingService", "Using video encoder: $videoEncoderName")
-        videoEncoder = MediaCodec.createByCodecName(videoEncoderName).apply {
-            configure(videoMediaFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-
+        val videoHandlerThread = HandlerThread("StreamingService-Video").apply {
+            priority = Thread.MAX_PRIORITY
+            start()
+        }
+        videoThread = videoHandlerThread
+        // Assigned before configure so a failure here is cleaned up by teardownStreaming
+        videoEncoder = MediaCodec.createByCodecName(videoEncoderName)
+        videoEncoder?.apply {
+            // Callback must be set before configure for async mode
             setCallback(object : MediaCodec.Callback() {
                 override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {
                     // Input buffers handled by Surface input
@@ -564,7 +591,8 @@ class StreamingService : Service() {
                 ) {
                     val buffer = codec.getOutputBuffer(index) ?: return
                     val array = ByteArray(info.size)
-                    buffer.get(array, info.offset, info.size)
+                    buffer.position(info.offset)
+                    buffer.get(array)
 
                     // Normalize to stream start time - both audio and video use the same reference
                     // so they remain in sync while starting near zero for MPEG-TS compatibility
@@ -572,7 +600,7 @@ class StreamingService : Service() {
 
                     // Queue network writes on dedicated thread to avoid blocking encoder
                     val flags = info.flags
-                    networkExecutor?.execute {
+                    writeAsync {
                         try {
                             // Write to WHIP sink if configured
                             val gccBitrate = whipSink?.writeH264(array, ts) ?: 0
@@ -639,21 +667,19 @@ class StreamingService : Service() {
                 }
 
                 override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
-                    Log.e("StreamingService", "Audio encoder error: ${e.message}, isRecoverable=${e.isRecoverable}, isTransient=${e.isTransient}", e)
+                    Log.e("StreamingService", "Video encoder error: ${e.message}, isRecoverable=${e.isRecoverable}, isTransient=${e.isTransient}", e)
                 }
 
                 override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
                     Log.i("StreamingService", "Encoder output format changed: $format")
                 }
-            }, Handler(HandlerThread("StreamingService-Video").apply { 
-                priority = Thread.MAX_PRIORITY
-                start()
-            }.looper))
+            }, Handler(videoHandlerThread.looper))
+            configure(videoMediaFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         }
         videoEncoderInputSurface = videoEncoder?.createInputSurface()
 
         if (ActivityCompat.checkSelfPermission(applicationContext, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            return
+            throw IllegalStateException("RECORD_AUDIO permission not granted")
         }
         // Set audio format parameters directly
         // Input is mono from AudioSource, converted to stereo before encoding
@@ -667,66 +693,19 @@ class StreamingService : Service() {
             throw IllegalStateException("No audio encoder found for ${audioMediaFormat.getString(MediaFormat.KEY_MIME)}")
         }
         Log.i("StreamingService", "Using audio encoder: $audioEncoderName")
-        audioEncoder = MediaCodec.createByCodecName(audioEncoderName).apply {
-            configure(audioMediaFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-
+        val audioHandlerThread = HandlerThread("StreamingService-Audio").apply {
+            priority = Thread.MAX_PRIORITY
+            start()
+        }
+        audioThread = audioHandlerThread
+        audioEncoder = MediaCodec.createByCodecName(audioEncoderName)
+        audioEncoder?.apply {
             setCallback(object : MediaCodec.Callback() {
                 var audioInputCount = 0L
                 var audioOutputCount = 0L
 
                 override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {
-                    try {
-                        val buffer = codec.getInputBuffer(index) ?: return
-                        buffer.clear()
-                        val bufferCapacity = buffer.capacity()
-
-                        // Build up data to fill the encoder buffer
-                        var accumulated = audioBufferRemainder
-                        var timestampNanos = audioBufferTimestampNanos
-
-                        // Pull from queue until we have enough data
-                        while (accumulated.size < bufferCapacity) {
-                            val chunk = audioBufferQueue.poll() ?: break
-                            // Use timestamp of first chunk in this buffer
-                            if (accumulated.isEmpty() && audioBufferRemainder.isEmpty()) {
-                                timestampNanos = chunk.second
-                            }
-                            accumulated = accumulated + chunk.first
-                        }
-
-                        if (accumulated.isEmpty()) {
-                            // No data available, queue empty buffer
-                            codec.queueInputBuffer(index, 0, 0, 0, 0)
-                            return
-                        }
-
-                        // Take what we need, save the rest
-                        val dataSize = minOf(accumulated.size, bufferCapacity)
-                        buffer.put(accumulated, 0, dataSize)
-
-                        // Save remainder for next call
-                        audioBufferRemainder = if (accumulated.size > dataSize) {
-                            accumulated.copyOfRange(dataSize, accumulated.size)
-                        } else {
-                            ByteArray(0)
-                        }
-                        // Track timestamp for remainder data
-                        audioBufferTimestampNanos = timestampNanos
-
-                        // Debug: log input PCM size periodically
-                        audioInputCount++
-                        if (audioInputCount % 100 == 0L) {
-                            Log.i("StreamingService", "Audio INPUT: frame=$audioInputCount, accumulated=${accumulated.size}, sent=$dataSize, remainder=${audioBufferRemainder.size}, queueSize=${audioBufferQueue.size}")
-                        }
-
-                        // Convert capture timestamp from nanos to micros for MediaCodec
-                        // Using raw CLOCK_MONOTONIC time (same base as video UVC PTS)
-                        val timestampUs = timestampNanos / 1000
-
-                        codec.queueInputBuffer(index, 0, dataSize, timestampUs, 0)
-                    } catch (e: IllegalStateException) {
-                        // Encoder is stopping, ignore
-                    }
+                    pumpAudioInput(codec, index)
                 }
 
                 override fun onOutputBufferAvailable(
@@ -737,7 +716,8 @@ class StreamingService : Service() {
                     try {
                         val buffer = codec.getOutputBuffer(index) ?: return
                         val array = ByteArray(info.size)
-                        buffer.get(array, info.offset, info.size)
+                        buffer.position(info.offset)
+                        buffer.get(array)
 
                         // Debug: log output AAC size periodically
                         audioOutputCount++
@@ -748,7 +728,7 @@ class StreamingService : Service() {
                         // Normalize to stream start time - same reference as video for A/V sync
                         val pts = info.presentationTimeUs - (streamStartTimeNanos / 1000)
                         val flags = info.flags
-                        networkExecutor?.execute {
+                        writeAsync {
                             try {
                                 if (useOpusAudio) {
                                     // Opus mode - write to WHIP (WebRTC) and SRT/RIST (if configured)
@@ -778,10 +758,8 @@ class StreamingService : Service() {
                 override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
                     Log.i("StreamingService", "Encoder output format changed: $format")
                 }
-            }, Handler(HandlerThread("StreamingService-Audio").apply { 
-                priority = Thread.MAX_PRIORITY
-                start()
-            }.looper))
+            }, Handler(audioHandlerThread.looper))
+            configure(audioMediaFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         }
 
         videoEncoder?.start()
@@ -790,152 +768,76 @@ class StreamingService : Service() {
         lastBitrate = 2000000 // Start at 2 Mbps
     }
 
-    private fun setupDebugAudioPlayback() {
-        // Create AudioTrack for debug playback - matching recording parameters
-        val sampleRate = 48000  // Match recording sample rate
-        val channelConfig = AudioFormat.CHANNEL_OUT_MONO  // Match recording channel (mono)
-        val audioFormat = AudioFormat.ENCODING_PCM_16BIT
-        
-        val bufferSize = AudioTrack.getMinBufferSize(
-            sampleRate,
-            channelConfig,
-            audioFormat
-        )
-        
-        // Use AudioAttributes instead of deprecated stream type
-        val audioAttributes = AudioAttributes.Builder()
-            .setUsage(AudioAttributes.USAGE_MEDIA)
-            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-            .build()
-            
-        val audioTrackFormat = AudioFormat.Builder()
-            .setSampleRate(sampleRate)
-            .setChannelMask(channelConfig)
-            .setEncoding(audioFormat)
-            .build()
-            
-        debugAudioTrack = AudioTrack.Builder()
-            .setAudioAttributes(audioAttributes)
-            .setAudioFormat(audioTrackFormat)
-            .setBufferSizeInBytes(bufferSize)
-            .setTransferMode(AudioTrack.MODE_STREAM)
-            .build()
-        
-        // Check if AudioTrack was initialized successfully
-        if (debugAudioTrack?.state != AudioTrack.STATE_INITIALIZED) {
-            Log.e("StreamingService", "Failed to initialize AudioTrack! State: ${debugAudioTrack?.state}")
-            debugAudioTrack?.release()
-            debugAudioTrack = null
-            return
-        }
-        
-        val playState = debugAudioTrack?.playState
-        debugAudioTrack?.play()
-        val newPlayState = debugAudioTrack?.playState
-        
-        // Check volume levels
-        val audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
-        val currentVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-        val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-        
-        Log.i("StreamingService", "Debug audio playback started - sample rate: $sampleRate Hz, buffer size: $bufferSize, state: $playState -> $newPlayState")
-        Log.i("StreamingService", "Audio volume: $currentVolume/$maxVolume, AudioTrack state: ${debugAudioTrack?.state}, playState: $newPlayState")
-    }
-    
-    
-    // Audio buffer queue to properly handle size mismatches between AudioSource and encoder
-    // Stores pairs of (stereo PCM data, capture timestamp in nanos)
-    private val audioBufferQueue = java.util.concurrent.LinkedBlockingQueue<Pair<ByteArray, Long>>(100)
-    private var audioBufferRemainder = ByteArray(0) // Leftover bytes from previous chunk
-    private var audioBufferTimestampNanos: Long = 0 // Timestamp for current accumulated buffer
-
-    private fun feedAudioDataToEncoder(timestampedAudio: TimestampedAudio) {
-        if (timestampedAudio.encoding != AudioFormat.ENCODING_PCM_16BIT) {
-            Log.w("StreamingService", "Dropping unsupported PCM encoding: ${timestampedAudio.encoding}")
-            return
-        }
-
-        val encoderData = preparePcmForEncoder(
-            timestampedAudio.data,
-            timestampedAudio.sampleRate,
-            timestampedAudio.channelCount
-        ) ?: return
-        val framesInBuffer = encoderData.size / 4 // stereo 16-bit PCM
-        audioSampleCount += framesInBuffer
-
-        calculateAndSendAudioLevels(encoderData)
-
-        audioBufferQueue.offer(Pair(encoderData, timestampedAudio.captureTimeNanos))
-    }
-
-    private fun preparePcmForEncoder(audioData: ByteArray, sourceSampleRate: Int, sourceChannelCount: Int): ByteArray? {
-        if (sourceSampleRate != 48000) {
-            Log.w("StreamingService", "Dropping unsupported PCM sample rate: $sourceSampleRate")
-            return null
-        }
-
-        return when (sourceChannelCount) {
-            1 -> duplicateMonoToStereo(audioData)
-            2 -> audioData
-            else -> {
-                Log.w("StreamingService", "Dropping unsupported PCM channel count: $sourceChannelCount")
-                null
-            }
-        }
-    }
-
-    private fun duplicateMonoToStereo(monoData: ByteArray): ByteArray {
-        val stereoData = ByteArray(monoData.size * 2)
-        var monoOffset = 0
-        var stereoOffset = 0
-        while (monoOffset + 1 < monoData.size) {
-            val low = monoData[monoOffset]
-            val high = monoData[monoOffset + 1]
-            stereoData[stereoOffset] = low
-            stereoData[stereoOffset + 1] = high
-            stereoData[stereoOffset + 2] = low
-            stereoData[stereoOffset + 3] = high
-            monoOffset += 2
-            stereoOffset += 4
-        }
-        return stereoData
-    }
-
-    private fun calculateAndSendAudioLevels(audioData: ByteArray) {
-        audioLevelCallback?.let { callback ->
+    /**
+     * Hands PCM to the audio encoder. [newIndex] is an input buffer the codec just offered;
+     * buffers with no PCM available are parked and filled when audio arrives, so the encoder
+     * is never given empty buffers (which would make it spin).
+     */
+    private fun pumpAudioInput(codec: MediaCodec, newIndex: Int?) {
+        synchronized(audioInputLock) {
+            if (newIndex != null) freeAudioInputs.addLast(newIndex)
             try {
-                // Convert byte array to 16-bit samples
-                val samples = ShortArray(audioData.size / 2)
-                for (i in samples.indices) {
-                    val low = audioData[i * 2].toInt() and 0xFF
-                    val high = audioData[i * 2 + 1].toInt() and 0xFF
-                    samples[i] = ((high shl 8) or low).toShort()
-                }
-                
-                // Split samples into 12 frequency bands for visualizer
-                val barCount = 12
-                val samplesPerBar = samples.size / barCount
-                val levels = FloatArray(barCount)
-                
-                for (i in 0 until barCount) {
-                    val startIndex = i * samplesPerBar
-                    val endIndex = minOf(startIndex + samplesPerBar, samples.size)
-                    
-                    var sum = 0L
-                    for (j in startIndex until endIndex) {
-                        val sample = samples[j].toInt()
-                        sum += (sample * sample).toLong()
+                while (freeAudioInputs.isNotEmpty()) {
+                    val index = freeAudioInputs.first()
+                    val buffer = codec.getInputBuffer(index)
+                    if (buffer == null) {
+                        freeAudioInputs.removeFirst()
+                        continue
                     }
-                    
-                    // Calculate RMS and normalize to 0-1 range
-                    val rms = kotlin.math.sqrt(sum.toDouble() / (endIndex - startIndex)).toFloat()
-                    levels[i] = (rms / 32768.0f).coerceIn(0.0f, 1.0f)
+                    buffer.clear()
+                    val pts = audioFeeder.fill(buffer)
+                    if (pts < 0) break
+                    freeAudioInputs.removeFirst()
+                    codec.queueInputBuffer(index, 0, buffer.position(), pts, 0)
                 }
-                
-                callback.onAudioLevels(levels)
-            } catch (e: Exception) {
-                Log.e("StreamingService", "Error calculating audio levels: ${e.message}")
+            } catch (e: IllegalStateException) {
+                // Encoder is stopping, ignore
             }
+        }
+    }
+
+    private fun handleAudio(audio: TimestampedAudio) {
+        if (audio.encoding != AudioFormat.ENCODING_PCM_16BIT) {
+            Log.w("StreamingService", "Dropping unsupported PCM encoding: ${audio.encoding}")
+            return
+        }
+        if (audio.sampleRate != 48000) {
+            Log.w("StreamingService", "Dropping unsupported PCM sample rate: ${audio.sampleRate}")
+            return
+        }
+        val stereo = when (audio.channelCount) {
+            1 -> monoToStereo(audio.data)
+            2 -> audio.data
+            else -> {
+                Log.w("StreamingService", "Dropping unsupported PCM channel count: ${audio.channelCount}")
+                return
+            }
+        }
+
+        sendAudioLevels(stereo)
+
+        if (!streaming) return
+        if (!audioFeeder.offer(stereo, audio.captureTimeNanos)) {
+            val dropped = audioFeeder.droppedChunks
+            if (dropped % 100 == 1L) Log.w("StreamingService", "Audio queue full, dropped $dropped chunks")
+        }
+        audioEncoder?.let { pumpAudioInput(it, null) }
+    }
+
+    private fun sendAudioLevels(pcm: ByteArray) {
+        val count = audioLevelCallbacks.beginBroadcast()
+        try {
+            if (count == 0) return
+            computeAudioLevels(pcm, audioLevels)
+            for (i in 0 until count) {
+                try {
+                    audioLevelCallbacks.getBroadcastItem(i).onAudioLevels(audioLevels)
+                } catch (e: Exception) {
+                    // Dead or misbehaving client; RemoteCallbackList drops it on death
+                }
+            }
+        } finally {
+            audioLevelCallbacks.finishBroadcast()
         }
     }
 
@@ -1005,18 +907,6 @@ class StreamingService : Service() {
         // Apply 180° rotation setting if enabled
         val rotate180 = runBlocking { settings!!.rotateVideo180.first() }
         renderer?.setRotate180(rotate180)
-
-        // Check for overlay permission before initializing WebView overlay
-        webViewOverlay = WebViewOverlay(applicationContext)
-        webViewOverlay?.setRenderer(renderer)
-        val success = webViewOverlay?.initialize(
-            url = "https://overlays.rtirl.com/gta.html?key=rm0qb5jr0qtis39f",
-            x = 950,
-            y = 1080 - 270,
-            width = 960,
-            height = 260,
-            scale = 0.5f,
-        ) ?: false
 
         // Set up the video flow - runs continuously for preview
         // Combine with deviceRefreshTrigger to allow USB reconnection
@@ -1114,7 +1004,6 @@ class StreamingService : Service() {
         .launchIn(videoScope)
         
         // Set up audio flow - runs continuously for monitoring
-        setupDebugAudioPlayback()
         audioFlowJob =
             // Combine audio device setting with video device changes
             combine(
@@ -1135,13 +1024,7 @@ class StreamingService : Service() {
             }
             .buffer(10) // Small bounded buffer to avoid dropping audio samples
             .onEach { timestampedAudio ->
-                // Only feed to encoder if streaming
-                if (audioEncoder != null) {
-                    feedAudioDataToEncoder(timestampedAudio)
-                } else {
-                    // Still calculate audio levels for visualizer even when not streaming
-                    calculateAndSendAudioLevels(timestampedAudio.data)
-                }
+                handleAudio(timestampedAudio)
             }
             .launchIn(audioScope)
     }
@@ -1197,7 +1080,7 @@ class StreamingService : Service() {
                 val usbDevice = VideoSourceDevice.UsbCamera(device)
                 
                 // Request permission and set device asynchronously
-                kotlinx.coroutines.GlobalScope.launch {
+                videoScope.launch {
                     // Request permission if it's a UVC/UAC device
                     if (device.isUvc() || device.isUac()) {
                         val granted = usbDevice.requestPermission(this@StreamingService)
@@ -1206,14 +1089,7 @@ class StreamingService : Service() {
                             return@launch
                         }
                     }
-                    
-                    // Update active device locally
-                    // Device is now stored in settings
-
-                    // Save to settings
-                    videoScope.launch {
-                        settings?.setSelectedVideoDevice(usbDevice)
-                    }
+                    settings?.setSelectedVideoDevice(usbDevice)
                 }
             }
         } else if (intent?.action == ACTION_USB_DEVICE_CHANGED) {
@@ -1242,44 +1118,17 @@ class StreamingService : Service() {
         deviceFlowJob?.cancel()
         deviceFlowJob = null
         
-        // Clean up encoders
-        renderer?.removeOutputSurface(videoEncoderInputSurface)
-        videoEncoder?.stop()
-        videoEncoderInputSurface?.release()
-        videoEncoderInputSurface = null
-        videoEncoder?.release()
-        videoEncoder = null
-
         // Cancel audio flow job
         audioFlowJob?.cancel()
         audioFlowJob = null
-        
+
         // Cancel the IO scopes
         videoScope.cancel()
         audioScope.cancel()
-        
-        // Clean up debug audio playback
-        debugAudioTrack?.stop()
-        debugAudioTrack?.release()
-        debugAudioTrack = null
-        
 
-        // AudioRecord cleanup no longer needed - handled by AudioSource flow
-        
-        audioEncoder?.stop()
-        audioEncoder?.release()
-        audioEncoder = null
-        
-        whipSink?.close()
-        whipSink = null
-        srtSink?.close()
-        srtSink = null
-        ristSink?.close()
-        ristSink = null
+        synchronized(lifecycleLock) { teardownStreaming() }
+        audioLevelCallbacks.kill()
 
-        networkExecutor?.shutdown()
-        networkExecutor = null
-        
         // Release WebView overlay
         webViewOverlay?.release()
         webViewOverlay = null

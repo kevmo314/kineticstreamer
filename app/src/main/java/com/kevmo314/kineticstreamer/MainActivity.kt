@@ -86,7 +86,7 @@ class MainActivity : ComponentActivity() {
 
         if (intent != null && intent.action.equals(UsbManager.ACTION_USB_DEVICE_ATTACHED)) {
             val pendingIntent = PendingIntent.getBroadcast(
-                this, 0, Intent(this, StreamingService.UsbReceiver::class.java).apply {
+                this, 0, Intent(this, StreamingService.UsbPermissionReceiver::class.java).apply {
                     action = StreamingService.UsbReceiver.ACTION_USB_PERMISSION
                 },
                 PendingIntent.FLAG_MUTABLE

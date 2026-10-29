@@ -48,6 +48,9 @@
             android:enabled="true"
             android:foregroundServiceType="camera|microphone" />
         <receiver
+            android:name=".StreamingService$UsbPermissionReceiver"
+            android:exported="false" />
+        <receiver
             android:name=".StreamingService$UsbReceiver"
             android:enabled="true"
             android:exported="true">
@@ -61,4 +64,4 @@
         </receiver>
     </application>
 
-</manifest>
+</manifest>
