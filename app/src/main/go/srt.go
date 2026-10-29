@@ -472,6 +472,13 @@ func (s *SRTSink) reconnect() error {
 			return fmt.Errorf("SRT: sink closed during reconnect")
 		}
 
+		select {
+		case <-s.done:
+			srtRelease() // Close left the reference to us
+			return fmt.Errorf("SRT: sink closed during reconnect")
+		default:
+		}
+
 		sck, err := s.connect()
 
 		s.Lock()
@@ -490,6 +497,7 @@ func (s *SRTSink) reconnect() error {
 		}
 		s.fd = sck.fd
 		s.mux = newTSMux(sck, sck.payloadSize, s.tracks)
+		s.lastPktSndLossTotal = 0 // stats are per socket
 		s.reconnecting = false
 		s.Unlock()
 
@@ -507,7 +515,7 @@ func (s *SRTSink) WriteSample(i int, buf []byte, ptsMicroseconds int64, mediaCod
 		s.Unlock()
 		return fmt.Errorf("SRT: sink closed")
 	}
-	if i >= len(s.tracks) {
+	if i < 0 || i >= len(s.tracks) {
 		s.Unlock()
 		return fmt.Errorf("SRT: invalid track index %d", i)
 	}
@@ -569,6 +577,10 @@ func (s *SRTSink) SetPLICallback(callback SRTPLICallback) {
 func (s *SRTSink) GetStatsAndBandwidth() int64 {
 	s.Lock()
 	defer s.Unlock()
+
+	if s.closed || s.fd == srtInvalidSock {
+		return s.targetBitrate
+	}
 
 	now := time.Now()
 

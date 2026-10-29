@@ -183,7 +183,7 @@ func (s *RISTSink) WriteSample(i int, buf []byte, ptsMicroseconds int64, mediaCo
 	if s.closed {
 		return fmt.Errorf("RIST: sink closed")
 	}
-	if i >= len(s.tracks) {
+	if i < 0 || i >= len(s.tracks) {
 		return fmt.Errorf("RIST: invalid track index %d", i)
 	}
 

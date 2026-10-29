@@ -26,6 +26,11 @@ func newTSMux(w io.Writer, size int, tracks []*mpegts.Track) *tsMux {
 
 // reset discards buffered bytes, the sticky bufio error and the muxer state.
 func (m *tsMux) reset() {
+	// The writer keeps per-track state (leading/PCR track) on the Track
+	// structs themselves; clear it so a fresh writer starts clean.
+	for _, t := range m.tracks {
+		*t = mpegts.Track{Codec: t.Codec}
+	}
 	m.bw = bufio.NewWriterSize(m.w, m.size)
 	m.mpw = mpegts.NewWriter(m.bw, m.tracks)
 }
