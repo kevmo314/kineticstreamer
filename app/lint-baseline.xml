@@ -74,19 +74,19 @@
         errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/java/com/kevmo314/kineticstreamer/WebViewOverlay.kt"
-            line="119"
+            line="120"
             column="13"/>
     </issue>
 
     <issue
         id="WakelockTimeout"
         message="Provide a timeout when requesting a wakelock with `PowerManager.Wakelock.acquire(long timeout)`. This will ensure the OS will cleanup any wakelocks that last longer than you intend, and will save your user&apos;s battery."
-        errorLine1="            acquire()"
-        errorLine2="            ~~~~~~~~~">
+        errorLine1="            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, &quot;KineticStreamer::StreamingWakeLock&quot;).apply { acquire() }"
+        errorLine2="                                                                                                       ~~~~~~~~~">
         <location
             file="src/main/java/com/kevmo314/kineticstreamer/StreamingService.kt"
-            line="923"
-            column="13"/>
+            line="609"
+            column="104"/>
     </issue>
 
     <issue
@@ -119,17 +119,6 @@
         <location
             file="src/main/java/com/kevmo314/kineticstreamer/SettingsScreen.kt"
             line="150"
-            column="17"/>
-    </issue>
-
-    <issue
-        id="ObsoleteSdkInt"
-        message="Unnecessary; `SDK_INT` is always >= 31"
-        errorLine1="            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {"
-        errorLine2="                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/java/com/kevmo314/kineticstreamer/StreamingConfiguration.kt"
-            line="21"
             column="17"/>
     </issue>
 
@@ -345,12 +334,12 @@
     <issue
         id="UseKtx"
         message="Use the KTX extension function `String.toUri` instead?"
-        errorLine1="                    val uri = android.net.Uri.parse(rawUrl)"
-        errorLine2="                              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        errorLine1="                            val uri = Uri.parse(url.removePrefix(&quot;whip://&quot;))"
+        errorLine2="                                      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
-            file="src/main/java/com/kevmo314/kineticstreamer/StreamingService.kt"
-            line="547"
-            column="31"/>
+            file="src/main/java/com/kevmo314/kineticstreamer/OutputSinks.kt"
+            line="67"
+            column="39"/>
     </issue>
 
 </issues>
