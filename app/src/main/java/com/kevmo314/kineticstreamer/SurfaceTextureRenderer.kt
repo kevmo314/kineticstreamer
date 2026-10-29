@@ -158,7 +158,11 @@ class SurfaceTextureRenderer {
 
     // Overlay support
     private var overlayTexture: SurfaceTexture? = null
-    private var overlayTextureId: Int = 0
+
+    /** GL texture backing the overlay, or 0 if there is none. Owned (and deleted) by the renderer. */
+    @Volatile
+    var overlayTextureId: Int = 0
+        private set
     private val overlayBounds = FloatArray(4) // x, y, width, height in normalized coords [0,1]
     private val overlayTextureMatrix = FloatArray(16)
     private var hasOverlay = false
@@ -401,6 +405,7 @@ class SurfaceTextureRenderer {
     fun createOverlayTexture(width: Int, height: Int): SurfaceTexture {
         var result: SurfaceTexture? = null
         runOnGl {
+            releaseOverlay()
             val textures = IntArray(1)
             GLES20.glGenTextures(1, textures, 0)
             overlayTextureId = textures[0]
@@ -462,11 +467,19 @@ class SurfaceTextureRenderer {
      * Remove overlay
      */
     fun removeOverlay() {
-        glHandler.post {
-            overlayTexture = null
-            overlayTextureId = 0
-            hasOverlay = false
+        glHandler.post { releaseOverlay() }
+    }
+
+    /** Must run on the GL thread. The renderer owns the overlay SurfaceTexture and its texture. */
+    private fun releaseOverlay() {
+        overlayTexture?.release()
+        overlayTexture = null
+        if (overlayTextureId > 0) {
+            GLES20.glDeleteTextures(1, intArrayOf(overlayTextureId), 0)
         }
+        overlayTextureId = 0
+        overlayFrameAvailable = false
+        hasOverlay = false
     }
 
     /**
@@ -622,6 +635,7 @@ class SurfaceTextureRenderer {
         runOnGl {
             if (eglContext == EGL14.EGL_NO_CONTEXT) return@runOnGl
             makeIdleCurrent()
+            releaseOverlay()
             outputs.forEach { EGL14.eglDestroySurface(eglDisplay, it.eglSurface) }
             outputs.clear()
 

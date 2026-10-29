@@ -11,27 +11,22 @@ import android.content.pm.PackageManager
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.os.Build
-import android.os.Parcel
 import android.os.Parcelable
 import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.parcelize.Parcelize
 import kotlin.coroutines.resume
 
 /**
  * Wrapper class that represents a video source device which can be either
  * a camera ID or a USB device.
  */
+@Parcelize
 sealed class VideoSourceDevice : Parcelable {
+    @Parcelize
     data class Camera(val cameraId: String) : VideoSourceDevice() {
-        override fun writeToParcel(parcel: Parcel, flags: Int) {
-            parcel.writeInt(0) // Type identifier for Camera
-            parcel.writeString(cameraId)
-        }
-
-        override fun describeContents(): Int = 0
-
         /**
          * Check if camera permission is granted
          * Note: This doesn't request permission, just checks if it's granted.
@@ -106,14 +101,8 @@ sealed class VideoSourceDevice : Parcelable {
         }
     }
 
+    @Parcelize
     data class UsbCamera(val usbDevice: UsbDevice) : VideoSourceDevice() {
-        override fun writeToParcel(parcel: Parcel, flags: Int) {
-            parcel.writeInt(1) // Type identifier for UsbCamera
-            parcel.writeParcelable(usbDevice, flags)
-        }
-
-        override fun describeContents(): Int = 0
-
         /**
          * Request USB permission for this specific device
          * @return true if permission was granted, false otherwise
@@ -184,14 +173,8 @@ sealed class VideoSourceDevice : Parcelable {
     /**
      * RTMP server video source - receives video from external RTMP publishers
      */
-    data class RtmpServer(val port: Int = 1935) : VideoSourceDevice() {
-        override fun writeToParcel(parcel: Parcel, flags: Int) {
-            parcel.writeInt(2) // Type identifier for RtmpServer
-            parcel.writeInt(port)
-        }
-
-        override fun describeContents(): Int = 0
-    }
+    @Parcelize
+    data class RtmpServer(val port: Int = 1935) : VideoSourceDevice()
 
     /**
      * Returns a unique identifier for this device for use in preferences/settings
@@ -240,22 +223,6 @@ sealed class VideoSourceDevice : Parcelable {
                     RtmpServer(port)
                 }
                 else -> null
-            }
-        }
-
-        @JvmField
-        val CREATOR: Parcelable.Creator<VideoSourceDevice> = object : Parcelable.Creator<VideoSourceDevice> {
-            override fun createFromParcel(parcel: Parcel): VideoSourceDevice {
-                return when (parcel.readInt()) {
-                    0 -> Camera(parcel.readString()!!)
-                    1 -> UsbCamera(parcel.readParcelable(UsbDevice::class.java.classLoader)!!)
-                    2 -> RtmpServer(parcel.readInt())
-                    else -> throw IllegalArgumentException("Unknown VideoSourceDevice type")
-                }
-            }
-
-            override fun newArray(size: Int): Array<VideoSourceDevice?> {
-                return arrayOfNulls(size)
             }
         }
     }

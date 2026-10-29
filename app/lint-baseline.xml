@@ -24,36 +24,14 @@
     </issue>
 
     <issue
-        id="NotificationPermission"
-        message="When targeting Android 13 or higher, posting a permission requires holding the `POST_NOTIFICATIONS` permission"
-        errorLine1="        notificationManager.notify(68448, notification)"
-        errorLine2="        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/java/com/kevmo314/kineticstreamer/StreamingService.kt"
-            line="1190"
-            column="9"/>
-    </issue>
-
-    <issue
         id="OldTargetApi"
         message="Not targeting the latest versions of Android; compatibility modes apply. Consider testing and updating this version. Consult the `android.os.Build.VERSION_CODES` javadoc for details."
         errorLine1="        targetSdk = 36"
         errorLine2="        ~~~~~~~~~~~~~~">
         <location
             file="build.gradle.kts"
-            line="134"
+            line="61"
             column="9"/>
-    </issue>
-
-    <issue
-        id="UnspecifiedRegisterReceiverFlag"
-        message="`receiver` is missing `RECEIVER_EXPORTED` or `RECEIVER_NOT_EXPORTED` flag for unprotected broadcasts registered for com.kevmo314.kineticstreamer.PERMISSION_RESULT"
-        errorLine1="                context.registerReceiver(receiver, filter)"
-        errorLine2="                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/java/com/kevmo314/kineticstreamer/VideoSourceDevice.kt"
-            line="89"
-            column="17"/>
     </issue>
 
     <issue
@@ -74,7 +52,7 @@
         errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/AndroidManifest.xml"
-            line="33"
+            line="34"
             column="13"/>
     </issue>
 
@@ -85,30 +63,30 @@
         errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/AndroidManifest.xml"
-            line="44"
+            line="45"
             column="13"/>
     </issue>
 
     <issue
         id="SetJavaScriptEnabled"
         message="Using `setJavaScriptEnabled` can introduce XSS vulnerabilities into your application, review carefully"
-        errorLine1="                        javaScriptEnabled = true"
-        errorLine2="                        ~~~~~~~~~~~~~~~~~~~~~~~~">
+        errorLine1="            javaScriptEnabled = true"
+        errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/java/com/kevmo314/kineticstreamer/WebViewOverlay.kt"
-            line="106"
-            column="25"/>
+            line="120"
+            column="13"/>
     </issue>
 
     <issue
         id="WakelockTimeout"
         message="Provide a timeout when requesting a wakelock with `PowerManager.Wakelock.acquire(long timeout)`. This will ensure the OS will cleanup any wakelocks that last longer than you intend, and will save your user&apos;s battery."
-        errorLine1="            acquire()"
-        errorLine2="            ~~~~~~~~~">
+        errorLine1="            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, &quot;KineticStreamer::StreamingWakeLock&quot;).apply { acquire() }"
+        errorLine2="                                                                                                       ~~~~~~~~~">
         <location
             file="src/main/java/com/kevmo314/kineticstreamer/StreamingService.kt"
-            line="985"
-            column="13"/>
+            line="609"
+            column="104"/>
     </issue>
 
     <issue
@@ -118,19 +96,8 @@
         errorLine2="        ~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/AndroidManifest.xml"
-            line="29"
+            line="30"
             column="9"/>
-    </issue>
-
-    <issue
-        id="ObsoleteSdkInt"
-        message="Unnecessary; `SDK_INT` is never &lt; 31"
-        errorLine1="        if (Build.VERSION.SDK_INT &lt;= Build.VERSION_CODES.P) {"
-        errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/java/com/kevmo314/kineticstreamer/MainScreen.kt"
-            line="57"
-            column="13"/>
     </issue>
 
     <issue
@@ -151,18 +118,7 @@
         errorLine2="                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/java/com/kevmo314/kineticstreamer/SettingsScreen.kt"
-            line="166"
-            column="17"/>
-    </issue>
-
-    <issue
-        id="ObsoleteSdkInt"
-        message="Unnecessary; `SDK_INT` is always >= 31"
-        errorLine1="            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {"
-        errorLine2="                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/java/com/kevmo314/kineticstreamer/StreamingConfiguration.kt"
-            line="21"
+            line="150"
             column="17"/>
     </issue>
 
@@ -191,7 +147,7 @@
         errorLine2="                                            ~~~~~~~~~~~~~~">
         <location
             file="src/main/java/com/kevmo314/kineticstreamer/MainScreen.kt"
-            line="99"
+            line="122"
             column="45"/>
     </issue>
 
@@ -301,7 +257,7 @@
         errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="build.gradle.kts"
-            line="146"
+            line="73"
             column="13"/>
     </issue>
 
@@ -378,45 +334,12 @@
     <issue
         id="UseKtx"
         message="Use the KTX extension function `String.toUri` instead?"
-        errorLine1="                        val uri = android.net.Uri.parse(rawUrl)"
-        errorLine2="                                  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        errorLine1="                            val uri = Uri.parse(url.removePrefix(&quot;whip://&quot;))"
+        errorLine2="                                      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
-            file="src/main/java/com/kevmo314/kineticstreamer/MainActivity.kt"
-            line="258"
-            column="35"/>
-    </issue>
-
-    <issue
-        id="UseKtx"
-        message="Use the KTX extension function `String.toUri` instead?"
-        errorLine1="                        val uri = android.net.Uri.parse(config.url)"
-        errorLine2="                                  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/java/com/kevmo314/kineticstreamer/MainActivity.kt"
-            line="288"
-            column="35"/>
-    </issue>
-
-    <issue
-        id="UseKtx"
-        message="Use the KTX extension function `String.toUri` instead?"
-        errorLine1="                        val uri = android.net.Uri.parse(config.url)"
-        errorLine2="                                  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/java/com/kevmo314/kineticstreamer/MainActivity.kt"
-            line="320"
-            column="35"/>
-    </issue>
-
-    <issue
-        id="UseKtx"
-        message="Use the KTX extension function `String.toUri` instead?"
-        errorLine1="                    val uri = android.net.Uri.parse(rawUrl)"
-        errorLine2="                              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="src/main/java/com/kevmo314/kineticstreamer/StreamingService.kt"
-            line="502"
-            column="31"/>
+            file="src/main/java/com/kevmo314/kineticstreamer/OutputSinks.kt"
+            line="67"
+            column="39"/>
     </issue>
 
 </issues>
