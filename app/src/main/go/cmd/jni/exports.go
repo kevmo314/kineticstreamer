@@ -2,12 +2,11 @@ package main
 
 // #include <stdint.h>
 // #include <stdlib.h>
-// void GoWHIPOnPLI(int64_t handle);
-// void GoSRTOnPLI(int64_t handle);
+// void kinetic_pli_call(uintptr_t ref);
+// void kinetic_pli_release(uintptr_t ref);
 import "C"
 import (
 	"log"
-	"runtime"
 	"runtime/debug"
 	"sync"
 	"unsafe"
@@ -15,24 +14,77 @@ import (
 	"github.com/kevmo314/kinetic"
 )
 
-// Store references to prevent garbage collection
+// Handle tables. Closing always happens after the entry is removed, so a slow
+// Close (HTTP DELETE, SRT reconnect) never blocks other handles.
 var (
-	mu          sync.RWMutex
-	srtSinks    = make(map[int64]*kinetic.SRTSink)
-	ristSinks   = make(map[int64]*kinetic.RISTSink)
-	uvcSources  = make(map[int64]*kinetic.UVCSource)
-	uvcStreams  = make(map[int64]*kinetic.UVCStream)
-	whipSinks   = make(map[int64]*kinetic.WHIPSink)
-	whipPLICallbacks = make(map[int64]func())
-	rtspServers = make(map[int64]*kinetic.RTSPServerSink)
-	// rtmpServers and rtmpSources moved to exports_rtmp.go (64-bit only)
-	nextHandle  int64 = 1
+	srtSinks   kinetic.Handles[*srtEntry]
+	ristSinks  kinetic.Handles[*kinetic.RISTSink]
+	uvcSources kinetic.Handles[*kinetic.UVCSource]
+	uvcStreams kinetic.Handles[*kinetic.UVCStream]
+	whipSinks  kinetic.Handles[*whipEntry]
 )
 
-//export GoInit
-func GoInit() {
-	runtime.LockOSThread()
+// mu and nextHandle are used by the RTMP tables in exports_rtmp.go.
+var (
+	mu         sync.RWMutex
+	nextHandle int64 = 1
+)
+
+// pliHook holds the JNI global reference of a Kotlin PLICallback. The
+// reference is released under the same lock that guards calls into Java, so a
+// concurrent close can never delete it while a callback is in flight.
+type pliHook struct {
+	mu  sync.Mutex
+	ref C.uintptr_t
 }
+
+// set replaces the callback reference (0 clears it), releasing the old one.
+func (p *pliHook) set(ref C.uintptr_t) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.ref != 0 {
+		C.kinetic_pli_release(p.ref)
+	}
+	p.ref = ref
+}
+
+func (p *pliHook) fire() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.ref != 0 {
+		C.kinetic_pli_call(p.ref)
+	}
+}
+
+type srtEntry struct {
+	sink *kinetic.SRTSink
+	pli  pliHook
+}
+
+// OnPLI implements kinetic.SRTPLICallback.
+func (e *srtEntry) OnPLI() { e.pli.fire() }
+
+type whipEntry struct {
+	sink *kinetic.WHIPSink
+	pli  pliHook
+}
+
+// cbytes views C memory as a Go slice without copying.
+func cbytes(data unsafe.Pointer, length int32) []byte {
+	if data == nil || length <= 0 {
+		return nil
+	}
+	return unsafe.Slice((*byte)(data), int(length))
+}
+
+func recoverLog(name string) {
+	if r := recover(); r != nil {
+		log.Printf("PANIC in %s: %v\nStack trace:\n%s", name, r, debug.Stack())
+	}
+}
+
+//export GoInit
+func GoInit() {}
 
 //export GoCreateSRTSink
 func GoCreateSRTSink(urlStr *C.char, mimeTypesStr *C.char) (handle int64) {
@@ -42,103 +94,63 @@ func GoCreateSRTSink(urlStr *C.char, mimeTypesStr *C.char) (handle int64) {
 			handle = 0
 		}
 	}()
-	
-	url := C.GoString(urlStr)
-	mimeTypes := C.GoString(mimeTypesStr)
-	
-	sink, err := kinetic.NewSRTSink(url, mimeTypes)
+
+	sink, err := kinetic.NewSRTSink(C.GoString(urlStr), C.GoString(mimeTypesStr))
 	if err != nil {
+		log.Printf("Failed to create SRT sink: %v", err)
 		return 0
 	}
-	
-	mu.Lock()
-	handle = nextHandle
-	nextHandle++
-	srtSinks[handle] = sink
-	mu.Unlock()
-	
-	return handle
+
+	e := &srtEntry{sink: sink}
+	sink.SetPLICallback(e)
+	return srtSinks.Add(e)
 }
 
 //export GoSRTSinkWriteSample
 func GoSRTSinkWriteSample(handle int64, streamIndex int32, data unsafe.Pointer, length int32, ptsMicroseconds int64, flags int32) {
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("PANIC in GoSRTSinkWriteSample: %v\nStack trace:\n%s", r, debug.Stack())
-		}
-	}()
-	
-	mu.RLock()
-	sink, ok := srtSinks[handle]
-	mu.RUnlock()
-	
+	defer recoverLog("GoSRTSinkWriteSample")
+
+	e, ok := srtSinks.Get(handle)
 	if !ok {
 		return
 	}
-	
-	// Convert C bytes to Go slice without copying
-	goData := (*[1 << 30]byte)(data)[:length:length]
-	sink.WriteSample(int(streamIndex), goData, ptsMicroseconds, flags)
-}
-
-//export GoSRTSinkWriteH264
-func GoSRTSinkWriteH264(handle int64, data unsafe.Pointer, length int32, pts int64) {
-	// For backward compatibility, map to WriteSample with stream index 0
-	GoSRTSinkWriteSample(handle, 0, data, length, pts, 0)
-}
-
-//export GoSRTSinkWriteH265
-func GoSRTSinkWriteH265(handle int64, data unsafe.Pointer, length int32, pts int64) {
-	// For backward compatibility, map to WriteSample with stream index 0
-	GoSRTSinkWriteSample(handle, 0, data, length, pts, 0)
-}
-
-//export GoSRTSinkWriteOpus
-func GoSRTSinkWriteOpus(handle int64, data unsafe.Pointer, length int32, pts int64) {
-	// For backward compatibility, map to WriteSample with stream index 1 (audio)
-	GoSRTSinkWriteSample(handle, 1, data, length, pts, 0)
+	if err := e.sink.WriteSample(int(streamIndex), cbytes(data, length), ptsMicroseconds, flags); err != nil {
+		log.Printf("SRT: WriteSample: %v", err)
+	}
 }
 
 //export GoSRTSinkClose
 func GoSRTSinkClose(handle int64) {
-	mu.Lock()
-	sink, ok := srtSinks[handle]
-	if ok {
-		sink.Close()
-		delete(srtSinks, handle)
+	e, ok := srtSinks.Remove(handle)
+	if !ok {
+		return
 	}
-	mu.Unlock()
+	e.sink.Close()
+	e.pli.set(0)
 }
 
 //export GoSRTSinkGetBandwidth
 func GoSRTSinkGetBandwidth(handle int64) int64 {
-	mu.Lock()
-	sink, ok := srtSinks[handle]
-	mu.Unlock()
-
+	e, ok := srtSinks.Get(handle)
 	if !ok {
 		return 0
 	}
-
-	return sink.GetStatsAndBandwidth()
+	return e.sink.GetStatsAndBandwidth()
 }
 
+// GoSRTSinkSetPLICallback takes ownership of ref, a JNI global reference
+// (0 clears the callback).
+//
 //export GoSRTSinkSetPLICallback
-func GoSRTSinkSetPLICallback(handle int64) {
-	mu.Lock()
-	sink, ok := srtSinks[handle]
-	if ok {
-		sink.SetPLICallback(&srtPLICallbackWrapper{handle: handle})
+func GoSRTSinkSetPLICallback(handle int64, ref uintptr) {
+	e, ok := srtSinks.Get(handle)
+	if !ok {
+		if ref != 0 {
+			C.kinetic_pli_release(C.uintptr_t(ref))
+		}
+		return
 	}
-	mu.Unlock()
-}
-
-type srtPLICallbackWrapper struct {
-	handle int64
-}
-
-func (w *srtPLICallbackWrapper) OnPLI() {
-	C.GoSRTOnPLI(C.int64_t(w.handle))
+	e.pli.set(C.uintptr_t(ref))
 }
 
 //export GoCreateRISTSink
@@ -150,67 +162,32 @@ func GoCreateRISTSink(urlStr *C.char, mimeTypesStr *C.char) (handle int64) {
 		}
 	}()
 
-	url := C.GoString(urlStr)
-	mimeTypes := C.GoString(mimeTypesStr)
-
-	sink, err := kinetic.NewRISTSink(url, mimeTypes)
+	sink, err := kinetic.NewRISTSink(C.GoString(urlStr), C.GoString(mimeTypesStr))
 	if err != nil {
 		log.Printf("Failed to create RIST sink: %v", err)
 		return 0
 	}
-
-	mu.Lock()
-	handle = nextHandle
-	nextHandle++
-	ristSinks[handle] = sink
-	mu.Unlock()
-
-	return handle
+	return ristSinks.Add(sink)
 }
 
 //export GoRISTSinkWriteSample
 func GoRISTSinkWriteSample(handle int64, streamIndex int32, data unsafe.Pointer, length int32, ptsMicroseconds int64, flags int32) {
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("PANIC in GoRISTSinkWriteSample: %v\nStack trace:\n%s", r, debug.Stack())
-		}
-	}()
+	defer recoverLog("GoRISTSinkWriteSample")
 
-	mu.RLock()
-	sink, ok := ristSinks[handle]
-	mu.RUnlock()
+	sink, ok := ristSinks.Get(handle)
 	if !ok {
 		return
 	}
-
-	goData := (*[1 << 30]byte)(data)[:length:length]
-	sink.WriteSample(int(streamIndex), goData, ptsMicroseconds, flags)
-}
-
-//export GoRISTSinkWriteH264
-func GoRISTSinkWriteH264(handle int64, data unsafe.Pointer, length int32, pts int64) {
-	GoRISTSinkWriteSample(handle, 0, data, length, pts, 0)
-}
-
-//export GoRISTSinkWriteH265
-func GoRISTSinkWriteH265(handle int64, data unsafe.Pointer, length int32, pts int64) {
-	GoRISTSinkWriteSample(handle, 0, data, length, pts, 0)
-}
-
-//export GoRISTSinkWriteOpus
-func GoRISTSinkWriteOpus(handle int64, data unsafe.Pointer, length int32, pts int64) {
-	GoRISTSinkWriteSample(handle, 1, data, length, pts, 0)
+	if err := sink.WriteSample(int(streamIndex), cbytes(data, length), ptsMicroseconds, flags); err != nil {
+		log.Printf("RIST: WriteSample: %v", err)
+	}
 }
 
 //export GoRISTSinkClose
 func GoRISTSinkClose(handle int64) {
-	mu.Lock()
-	sink, ok := ristSinks[handle]
-	if ok {
+	if sink, ok := ristSinks.Remove(handle); ok {
 		sink.Close()
-		delete(ristSinks, handle)
 	}
-	mu.Unlock()
 }
 
 //export GoCreateUVCSource
@@ -221,25 +198,13 @@ func GoCreateUVCSource(fd int32) (handle int64) {
 			handle = 0
 		}
 	}()
-	
-	log.Printf("GoCreateUVCSource called with fd=%d", fd)
-	println("GoCreateUVCSource called with fd=", fd)
+
 	source, err := kinetic.NewUVCSource(int(fd))
 	if err != nil {
 		log.Printf("Failed to create UVC source: %v", err)
-		println("Failed to create UVC source:", err.Error())
 		return 0
 	}
-	log.Printf("Successfully created UVC source")
-	println("Successfully created UVC source")
-	
-	mu.Lock()
-	handle = nextHandle
-	nextHandle++
-	uvcSources[handle] = source
-	mu.Unlock()
-	
-	return handle
+	return uvcSources.Add(source)
 }
 
 //export GoUVCSourceStartStreaming
@@ -250,31 +215,24 @@ func GoUVCSourceStartStreaming(handle int64, format, width, height, fps int32) (
 			streamHandle = 0
 		}
 	}()
-	
-	mu.RLock()
-	source, ok := uvcSources[handle]
-	mu.RUnlock()
-	
+
+	source, ok := uvcSources.Get(handle)
 	if !ok {
 		return 0
 	}
-	
-	println("GoUVCSourceStartStreaming called with handle=", handle)
 	stream, err := source.StartStreaming(int(format), int(width), int(height), int(fps))
 	if err != nil {
-	    log.Printf("got error: %s", err)
-	    println("StartStreaming got error:", err.Error())
+		log.Printf("UVC: StartStreaming: %v", err)
 		return 0
 	}
-	println("StartStreaming succeeded")
-	
-	mu.Lock()
-	streamHandle = nextHandle
-	nextHandle++
-	uvcStreams[streamHandle] = stream
-	mu.Unlock()
-	
-	return streamHandle
+	return uvcStreams.Add(stream)
+}
+
+//export GoUVCSourceClose
+func GoUVCSourceClose(handle int64) {
+	if source, ok := uvcSources.Remove(handle); ok {
+		source.Close()
+	}
 }
 
 //export GoUVCStreamReadFrame
@@ -285,15 +243,11 @@ func GoUVCStreamReadFrame(handle int64, dataPtr *unsafe.Pointer, sizePtr *int32)
 			success = 0
 		}
 	}()
-	
-	mu.RLock()
-	stream, ok := uvcStreams[handle]
-	mu.RUnlock()
-	
+
+	stream, ok := uvcStreams.Get(handle)
 	if !ok {
 		return 0
 	}
-	
 	data, err := stream.ReadFrame()
 	if err != nil {
 		return 0
@@ -302,45 +256,32 @@ func GoUVCStreamReadFrame(handle int64, dataPtr *unsafe.Pointer, sizePtr *int32)
 	// Allocate memory and copy data
 	*dataPtr = C.CBytes(data)
 	*sizePtr = int32(len(data))
-	
-	return 1 // Success
+	return 1
 }
 
 //export GoUVCStreamGetPTS
 func GoUVCStreamGetPTS(handle int64) int64 {
-	mu.RLock()
-	stream, ok := uvcStreams[handle]
-	mu.RUnlock()
-
+	stream, ok := uvcStreams.Get(handle)
 	if !ok {
 		return 0
 	}
-
 	return stream.GetPTS()
 }
 
 //export GoUVCStreamGetArrivalTimeNs
 func GoUVCStreamGetArrivalTimeNs(handle int64) int64 {
-	mu.RLock()
-	stream, ok := uvcStreams[handle]
-	mu.RUnlock()
-
+	stream, ok := uvcStreams.Get(handle)
 	if !ok {
 		return 0
 	}
-
 	return stream.GetArrivalTimeNs()
 }
 
 //export GoUVCStreamClose
 func GoUVCStreamClose(handle int64) {
-	mu.Lock()
-	stream, ok := uvcStreams[handle]
-	if ok {
+	if stream, ok := uvcStreams.Remove(handle); ok {
 		stream.Close()
-		delete(uvcStreams, handle)
 	}
-	mu.Unlock()
 }
 
 //export GoCreateWHIPSink
@@ -353,40 +294,34 @@ func GoCreateWHIPSink(urlStr, tokenStr, mimeTypesStr *C.char) (handle int64) {
 	}()
 
 	url := C.GoString(urlStr)
-	token := C.GoString(tokenStr)
 	mimeTypes := C.GoString(mimeTypesStr)
 
 	log.Printf("WHIP: creating sink url=%s mimeTypes=%s", url, mimeTypes)
 
-	sink, err := kinetic.NewWHIPSink(url, token, mimeTypes)
+	sink, err := kinetic.NewWHIPSink(url, C.GoString(tokenStr), mimeTypes)
 	if err != nil {
 		log.Printf("WHIP: failed to create sink: %v", err)
 		return 0
 	}
-	log.Printf("WHIP: sink created successfully")
-	
-	mu.Lock()
-	handle = nextHandle
-	nextHandle++
-	whipSinks[handle] = sink
-	mu.Unlock()
-	
-	return handle
+
+	e := &whipEntry{sink: sink}
+	sink.SetPLICallback(e.pli.fire)
+	return whipSinks.Add(e)
 }
 
-// Forward declaration for C callback function
-// GoWHIPOnPLI is implemented in jni_wrapper.c
-
+// GoWHIPSinkSetPLICallback takes ownership of ref, a JNI global reference
+// (0 clears the callback).
+//
 //export GoWHIPSinkSetPLICallback
-func GoWHIPSinkSetPLICallback(handle int64) {
-	mu.Lock()
-	sink, ok := whipSinks[handle]
-	if ok {
-		sink.SetPLICallback(func() {
-			C.GoWHIPOnPLI(C.int64_t(handle))
-		})
+func GoWHIPSinkSetPLICallback(handle int64, ref uintptr) {
+	e, ok := whipSinks.Get(handle)
+	if !ok {
+		if ref != 0 {
+			C.kinetic_pli_release(C.uintptr_t(ref))
+		}
+		return
 	}
-	mu.Unlock()
+	e.pli.set(C.uintptr_t(ref))
 }
 
 //export GoWHIPSinkWriteH264
@@ -397,21 +332,12 @@ func GoWHIPSinkWriteH264(handle int64, data unsafe.Pointer, length int32, pts in
 			bitrate = 0
 		}
 	}()
-	
-	mu.RLock()
-	sink, ok := whipSinks[handle]
-	mu.RUnlock()
-	
+
+	e, ok := whipSinks.Get(handle)
 	if !ok {
 		return 0
 	}
-	
-	// Convert C bytes to Go slice without copying
-	goData := (*[1 << 30]byte)(data)[:length:length]
-	// Make a copy since the original data might be reused
-	dataCopy := make([]byte, length)
-	copy(dataCopy, goData)
-	bitrateVal, err := sink.WriteH264(dataCopy, pts)
+	bitrateVal, err := e.sink.WriteH264(cbytes(data, length), pts)
 	if err != nil {
 		log.Printf("Error writing H264: %v", err)
 		return 0
@@ -421,63 +347,43 @@ func GoWHIPSinkWriteH264(handle int64, data unsafe.Pointer, length int32, pts in
 
 //export GoWHIPSinkWriteOpus
 func GoWHIPSinkWriteOpus(handle int64, data unsafe.Pointer, length int32, pts int64) {
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("PANIC in GoWHIPSinkWriteOpus: %v\nStack trace:\n%s", r, debug.Stack())
-		}
-	}()
-	
-	mu.RLock()
-	sink, ok := whipSinks[handle]
-	mu.RUnlock()
-	
+	defer recoverLog("GoWHIPSinkWriteOpus")
+
+	e, ok := whipSinks.Get(handle)
 	if !ok {
 		return
 	}
-	
-	// Convert C bytes to Go slice without copying
-	goData := (*[1 << 30]byte)(data)[:length:length]
-	// Make a copy since the original data might be reused
-	dataCopy := make([]byte, length)
-	copy(dataCopy, goData)
-	sink.WriteOpus(dataCopy, pts)
+	if err := e.sink.WriteOpus(cbytes(data, length), pts); err != nil {
+		log.Printf("WHIP: WriteOpus: %v", err)
+	}
 }
 
 //export GoWHIPSinkClose
 func GoWHIPSinkClose(handle int64) {
-	mu.Lock()
-	sink, ok := whipSinks[handle]
-	if ok {
-		sink.Close()
-		delete(whipSinks, handle)
+	e, ok := whipSinks.Remove(handle)
+	if !ok {
+		return
 	}
-	mu.Unlock()
+	e.sink.Close()
+	e.pli.set(0)
 }
 
 //export GoWHIPSinkGetICEConnectionState
 func GoWHIPSinkGetICEConnectionState(handle int64) *C.char {
-	mu.RLock()
-	sink, ok := whipSinks[handle]
-	mu.RUnlock()
-
+	e, ok := whipSinks.Get(handle)
 	if !ok {
 		return C.CString("unknown")
 	}
-
-	return C.CString(sink.GetICEConnectionState())
+	return C.CString(e.sink.GetICEConnectionState())
 }
 
 //export GoWHIPSinkGetPeerConnectionState
 func GoWHIPSinkGetPeerConnectionState(handle int64) *C.char {
-	mu.RLock()
-	sink, ok := whipSinks[handle]
-	mu.RUnlock()
-
+	e, ok := whipSinks.Get(handle)
 	if !ok {
 		return C.CString("unknown")
 	}
-
-	return C.CString(sink.GetPeerConnectionState())
+	return C.CString(e.sink.GetPeerConnectionState())
 }
 
 // RTMP Server exports are in exports_rtmp.go (64-bit platforms only)

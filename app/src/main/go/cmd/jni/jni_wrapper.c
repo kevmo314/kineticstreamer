@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <pthread.h>
 #include "_cgo_export.h"
 
 // Helper function to convert jstring to C string
@@ -30,15 +31,57 @@ void release_bytes(JNIEnv* env, jbyteArray arr, jbyte* bytes) {
     }
 }
 
-// Global references for PLI callbacks
 static JavaVM* g_jvm = NULL;
-static jobject g_whipPLICallbacks[100] = {NULL};
-static jobject g_srtPLICallbacks[100] = {NULL};
+static jmethodID g_onPLI = NULL;  // PLICallback.onPLI, cached in Kinetic.init
+static pthread_key_t g_detachKey;
+
+// Detaches a Go-owned thread when it exits (we attach it lazily, see get_env).
+static void detach_thread(void* unused) {
+    (*g_jvm)->DetachCurrentThread(g_jvm);
+}
+
+// Returns the JNIEnv for the calling thread, attaching it (once, detached on
+// thread exit) if it is a Go thread the JVM has not seen yet.
+static JNIEnv* get_env(void) {
+    JNIEnv* env = NULL;
+    if (g_jvm == NULL) return NULL;
+    if ((*g_jvm)->GetEnv(g_jvm, (void**)&env, JNI_VERSION_1_6) == JNI_OK) return env;
+    if ((*g_jvm)->AttachCurrentThread(g_jvm, &env, NULL) != JNI_OK) return NULL;
+    pthread_setspecific(g_detachKey, env);
+    return env;
+}
+
+// Called from Go: invoke PLICallback.onPLI on the global reference `ref`.
+void kinetic_pli_call(uintptr_t ref) {
+    JNIEnv* env = get_env();
+    if (env == NULL || g_onPLI == NULL) return;
+    (*env)->CallVoidMethod(env, (jobject)ref, g_onPLI);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionDescribe(env);
+        (*env)->ExceptionClear(env);
+    }
+}
+
+// Called from Go: delete a global reference created by a setPLICallback wrapper.
+void kinetic_pli_release(uintptr_t ref) {
+    JNIEnv* env = get_env();
+    if (env != NULL) (*env)->DeleteGlobalRef(env, (jobject)ref);
+}
+
+// Creates the global reference handed to Go (NULL stays NULL = clear).
+static uintptr_t new_pli_ref(JNIEnv* env, jobject callback) {
+    return callback == NULL ? 0 : (uintptr_t)(*env)->NewGlobalRef(env, callback);
+}
 
 // JNI wrapper functions
 JNIEXPORT void JNICALL
 Java_com_kevmo314_kineticstreamer_kinetic_Kinetic_init(JNIEnv* env, jclass clazz) {
     (*env)->GetJavaVM(env, &g_jvm);
+    pthread_key_create(&g_detachKey, detach_thread);
+    jclass cls = (*env)->FindClass(env, "com/kevmo314/kineticstreamer/kinetic/PLICallback");
+    if (cls != NULL) {
+        g_onPLI = (*env)->GetMethodID(env, cls, "onPLI", "()V");
+    }
     GoInit();
 }
 
@@ -56,43 +99,16 @@ Java_com_kevmo314_kineticstreamer_kinetic_SRTSink_create(JNIEnv* env, jclass cla
 }
 
 JNIEXPORT void JNICALL
-Java_com_kevmo314_kineticstreamer_kinetic_SRTSink_writeH264(JNIEnv* env, jobject obj, jlong handle, jbyteArray data, jlong pts) {
+Java_com_kevmo314_kineticstreamer_kinetic_SRTSink_writeSample(JNIEnv* env, jobject obj, jlong handle, jint streamIndex, jbyteArray data, jlong pts, jint flags) {
     jbyte* bytes = jbyteArray_to_bytes(env, data);
-    jsize length = (*env)->GetArrayLength(env, data);
-    
-    GoSRTSinkWriteH264(handle, bytes, length, pts);
-    
-    release_bytes(env, data, bytes);
-}
-
-JNIEXPORT void JNICALL
-Java_com_kevmo314_kineticstreamer_kinetic_SRTSink_writeH265(JNIEnv* env, jobject obj, jlong handle, jbyteArray data, jlong pts) {
-    jbyte* bytes = jbyteArray_to_bytes(env, data);
-    jsize length = (*env)->GetArrayLength(env, data);
-    
-    GoSRTSinkWriteH265(handle, bytes, length, pts);
-    
-    release_bytes(env, data, bytes);
-}
-
-JNIEXPORT void JNICALL
-Java_com_kevmo314_kineticstreamer_kinetic_SRTSink_writeOpus(JNIEnv* env, jobject obj, jlong handle, jbyteArray data, jlong pts) {
-    jbyte* bytes = jbyteArray_to_bytes(env, data);
-    jsize length = (*env)->GetArrayLength(env, data);
-    
-    GoSRTSinkWriteOpus(handle, bytes, length, pts);
-    
+    if (bytes == NULL) return;
+    GoSRTSinkWriteSample(handle, streamIndex, bytes, (*env)->GetArrayLength(env, data), pts, flags);
     release_bytes(env, data, bytes);
 }
 
 JNIEXPORT void JNICALL
 Java_com_kevmo314_kineticstreamer_kinetic_SRTSink_close(JNIEnv* env, jobject obj, jlong handle) {
     GoSRTSinkClose(handle);
-    // Clean up PLI callback if exists
-    if (handle < 100 && g_srtPLICallbacks[handle] != NULL) {
-        (*env)->DeleteGlobalRef(env, g_srtPLICallbacks[handle]);
-        g_srtPLICallbacks[handle] = NULL;
-    }
 }
 
 JNIEXPORT jlong JNICALL
@@ -102,16 +118,7 @@ Java_com_kevmo314_kineticstreamer_kinetic_SRTSink_getBandwidth(JNIEnv* env, jobj
 
 JNIEXPORT void JNICALL
 Java_com_kevmo314_kineticstreamer_kinetic_SRTSink_setPLICallback(JNIEnv* env, jobject obj, jlong handle, jobject callback) {
-    if (handle >= 100) return;
-
-    // Store global reference to callback
-    if (g_srtPLICallbacks[handle] != NULL) {
-        (*env)->DeleteGlobalRef(env, g_srtPLICallbacks[handle]);
-    }
-    g_srtPLICallbacks[handle] = (*env)->NewGlobalRef(env, callback);
-
-    // Register with Go
-    GoSRTSinkSetPLICallback(handle);
+    GoSRTSinkSetPLICallback(handle, new_pli_ref(env, callback));
 }
 
 // ---- RIST sink JNI bridge ---------------------------------------------------
@@ -127,54 +134,16 @@ Java_com_kevmo314_kineticstreamer_kinetic_RISTSink_create(JNIEnv* env, jclass cl
 }
 
 JNIEXPORT void JNICALL
-Java_com_kevmo314_kineticstreamer_kinetic_RISTSink_writeH264(JNIEnv* env, jobject obj, jlong handle, jbyteArray data, jlong pts) {
+Java_com_kevmo314_kineticstreamer_kinetic_RISTSink_writeSample(JNIEnv* env, jobject obj, jlong handle, jint streamIndex, jbyteArray data, jlong pts, jint flags) {
     jbyte* bytes = jbyteArray_to_bytes(env, data);
-    jsize length = (*env)->GetArrayLength(env, data);
-    GoRISTSinkWriteH264(handle, bytes, length, pts);
-    release_bytes(env, data, bytes);
-}
-
-JNIEXPORT void JNICALL
-Java_com_kevmo314_kineticstreamer_kinetic_RISTSink_writeH265(JNIEnv* env, jobject obj, jlong handle, jbyteArray data, jlong pts) {
-    jbyte* bytes = jbyteArray_to_bytes(env, data);
-    jsize length = (*env)->GetArrayLength(env, data);
-    GoRISTSinkWriteH265(handle, bytes, length, pts);
-    release_bytes(env, data, bytes);
-}
-
-JNIEXPORT void JNICALL
-Java_com_kevmo314_kineticstreamer_kinetic_RISTSink_writeOpus(JNIEnv* env, jobject obj, jlong handle, jbyteArray data, jlong pts) {
-    jbyte* bytes = jbyteArray_to_bytes(env, data);
-    jsize length = (*env)->GetArrayLength(env, data);
-    GoRISTSinkWriteOpus(handle, bytes, length, pts);
+    if (bytes == NULL) return;
+    GoRISTSinkWriteSample(handle, streamIndex, bytes, (*env)->GetArrayLength(env, data), pts, flags);
     release_bytes(env, data, bytes);
 }
 
 JNIEXPORT void JNICALL
 Java_com_kevmo314_kineticstreamer_kinetic_RISTSink_close(JNIEnv* env, jobject obj, jlong handle) {
     GoRISTSinkClose(handle);
-}
-
-// Called from Go when SRT detects packet loss
-void GoSRTOnPLI(int64_t handle) {
-    if (g_jvm == NULL || handle >= 100 || g_srtPLICallbacks[handle] == NULL) return;
-
-    JNIEnv* env;
-    int attached = 0;
-    if ((*g_jvm)->GetEnv(g_jvm, (void**)&env, JNI_VERSION_1_6) != JNI_OK) {
-        if ((*g_jvm)->AttachCurrentThread(g_jvm, &env, NULL) != JNI_OK) return;
-        attached = 1;
-    }
-
-    jclass cls = (*env)->GetObjectClass(env, g_srtPLICallbacks[handle]);
-    jmethodID method = (*env)->GetMethodID(env, cls, "onPLI", "()V");
-    if (method != NULL) {
-        (*env)->CallVoidMethod(env, g_srtPLICallbacks[handle], method);
-    }
-
-    if (attached) {
-        (*g_jvm)->DetachCurrentThread(g_jvm);
-    }
 }
 
 JNIEXPORT jlong JNICALL
@@ -185,6 +154,11 @@ Java_com_kevmo314_kineticstreamer_kinetic_UVCSource_create(JNIEnv* env, jclass c
 JNIEXPORT jlong JNICALL
 Java_com_kevmo314_kineticstreamer_kinetic_UVCSource_startStreaming(JNIEnv* env, jobject obj, jlong handle, jint format, jint width, jint height, jint fps) {
     return GoUVCSourceStartStreaming(handle, format, width, height, fps);
+}
+
+JNIEXPORT void JNICALL
+Java_com_kevmo314_kineticstreamer_kinetic_UVCSource_close(JNIEnv* env, jobject obj, jlong handle) {
+    GoUVCSourceClose(handle);
 }
 
 JNIEXPORT jbyteArray JNICALL
@@ -242,61 +216,28 @@ Java_com_kevmo314_kineticstreamer_kinetic_WHIPSink_create(JNIEnv* env, jclass cl
 JNIEXPORT jint JNICALL
 Java_com_kevmo314_kineticstreamer_kinetic_WHIPSink_writeH264(JNIEnv* env, jobject obj, jlong handle, jbyteArray data, jlong pts) {
     jbyte* bytes = jbyteArray_to_bytes(env, data);
-    jsize length = (*env)->GetArrayLength(env, data);
-    
-    jint bitrate = GoWHIPSinkWriteH264(handle, bytes, length, pts);
-    
+    if (bytes == NULL) return 0;
+    jint bitrate = GoWHIPSinkWriteH264(handle, bytes, (*env)->GetArrayLength(env, data), pts);
     release_bytes(env, data, bytes);
-    
     return bitrate;
 }
 
 JNIEXPORT void JNICALL
 Java_com_kevmo314_kineticstreamer_kinetic_WHIPSink_writeOpus(JNIEnv* env, jobject obj, jlong handle, jbyteArray data, jlong pts) {
     jbyte* bytes = jbyteArray_to_bytes(env, data);
-    jsize length = (*env)->GetArrayLength(env, data);
-    
-    GoWHIPSinkWriteOpus(handle, bytes, length, pts);
-    
+    if (bytes == NULL) return;
+    GoWHIPSinkWriteOpus(handle, bytes, (*env)->GetArrayLength(env, data), pts);
     release_bytes(env, data, bytes);
 }
 
 JNIEXPORT void JNICALL
 Java_com_kevmo314_kineticstreamer_kinetic_WHIPSink_close(JNIEnv* env, jobject obj, jlong handle) {
-    // Clean up callback reference
-    if (handle < 100 && g_whipPLICallbacks[handle] != NULL) {
-        (*env)->DeleteGlobalRef(env, g_whipPLICallbacks[handle]);
-        g_whipPLICallbacks[handle] = NULL;
-    }
     GoWHIPSinkClose(handle);
 }
 
 JNIEXPORT void JNICALL
 Java_com_kevmo314_kineticstreamer_kinetic_WHIPSink_setPLICallback(JNIEnv* env, jobject obj, jlong handle, jobject callback) {
-    if (handle < 100) {
-        // Store global reference to callback
-        if (g_whipPLICallbacks[handle] != NULL) {
-            (*env)->DeleteGlobalRef(env, g_whipPLICallbacks[handle]);
-        }
-        g_whipPLICallbacks[handle] = (*env)->NewGlobalRef(env, callback);
-        GoWHIPSinkSetPLICallback(handle);
-    }
-}
-
-// Called from Go when PLI is received
-void GoWHIPOnPLI(int64_t handle) {
-    if (g_jvm == NULL || handle >= 100 || g_whipPLICallbacks[handle] == NULL) return;
-
-    JNIEnv* env;
-    (*g_jvm)->AttachCurrentThread(g_jvm, &env, NULL);
-
-    jclass cls = (*env)->GetObjectClass(env, g_whipPLICallbacks[handle]);
-    jmethodID mid = (*env)->GetMethodID(env, cls, "onPLI", "()V");
-    if (mid != NULL) {
-        (*env)->CallVoidMethod(env, g_whipPLICallbacks[handle], mid);
-    }
-
-    (*g_jvm)->DetachCurrentThread(g_jvm);
+    GoWHIPSinkSetPLICallback(handle, new_pli_ref(env, callback));
 }
 
 JNIEXPORT jstring JNICALL
