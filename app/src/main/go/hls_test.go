@@ -124,3 +124,23 @@ func TestHLSSinkListenErrorAndClose(t *testing.T) {
 		t.Errorf("got %d", status)
 	}
 }
+
+func TestHLSSinkAAC(t *testing.T) {
+	disk := NewBinaryDumpSink(t.TempDir())
+	frame := []byte("aac-frame-payload")
+	for i := int64(0); i < 3; i++ {
+		if err := disk.WriteSample(0, frame, 1_000_000+i*21_333, keyFrame); err != nil {
+			t.Fatal(err)
+		}
+	}
+	disk.Close()
+	sink, err := NewHLSSink(disk, "127.0.0.1:0", "", "audio/mp4a-latm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sink.Close()
+	status, _, body := get(t, sink, "/1000000.ts")
+	if status != http.StatusOK || len(body) == 0 || len(body)%188 != 0 || !strings.Contains(body, string(frame)) {
+		t.Fatalf("status %d, %d bytes", status, len(body))
+	}
+}
