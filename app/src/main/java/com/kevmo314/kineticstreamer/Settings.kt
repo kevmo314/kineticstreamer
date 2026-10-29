@@ -50,25 +50,10 @@ data class Resolution(val width: Int, val height: Int) {
     }
 }
 
-data class OutputConfiguration(val url: String, val enabled: Boolean) {
-    override fun toString(): String = "$enabled:$url"
-
-    val protocol: String
-        get() = url.split(":", limit=2).first().uppercase()
-
-    companion object {
-        fun fromString(string: String): OutputConfiguration {
-            val (enabled, url) = string.split(":", limit=2)
-            return OutputConfiguration(url, enabled.toBoolean())
-        }
-    }
-}
-
 class Settings(private val dataStore: DataStore<Preferences>) {
     private val _codec = stringPreferencesKey("codec")
     private val _bitrate = intPreferencesKey("bitrate")
     private val _resolution = stringPreferencesKey("resolution")
-    private val _outputConfigurations = stringPreferencesKey("output_configurations")
     private val _recordingMaxCapacityBytes = longPreferencesKey("recording_max_capacity_bytes")
     private val _selectedVideoDevice = stringPreferencesKey("selected_video_device")
     private val _selectedAudioDevice = intPreferencesKey("selected_audio_device_id")
@@ -96,17 +81,9 @@ class Settings(private val dataStore: DataStore<Preferences>) {
         dataStore.edit { it[_resolution] = resolution.toString() }
     }
 
-    val outputConfigurations = dataStore.data
-        .map { it[_outputConfigurations] }
-        .map {
-            it?.split(";")?.map { s -> OutputConfiguration.fromString(s) } ?: listOf()
-        }
+    val outputs = OutputRepository(dataStore)
 
-    suspend fun setOutputConfigurations(outputConfigurations: List<OutputConfiguration>) {
-        dataStore.edit {
-            it[_outputConfigurations] = outputConfigurations.joinToString(";") { c -> c.toString() }
-        }
-    }
+    val outputConfigurations = outputs.configurations
 
     val recordingMaxCapacityBytes = dataStore.data.map {
         it[_recordingMaxCapacityBytes] ?: (1024L * 1024 * 1024)
