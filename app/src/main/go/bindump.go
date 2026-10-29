@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -13,6 +14,7 @@ import (
 	"sync"
 )
 
+// Each file starts with the codec-config records of every track, so it can be decoded alone.
 // Records are stored in "<pts>.ucf" files, one file per keyframe. Each record is a
 // fixed-size little-endian header followed by the payload:
 //
@@ -80,6 +82,9 @@ type BinaryDumpSink struct {
 
 	mu   sync.Mutex
 	file *os.File
+	// latest codec-config buffer per track (SPS/PPS, AAC config). The encoder emits it
+	// once, before the first keyframe, so it is repeated at the start of every file.
+	config map[int][]byte
 }
 
 // NewBinaryDumpSink records into directory. encodedMediaFormatMimeTypes lists the
@@ -96,14 +101,17 @@ func NewBinaryDumpSink(directory, encodedMediaFormatMimeTypes string) *BinaryDum
 			video[i] = true
 		}
 	}
-	return &BinaryDumpSink{directory: directory, video: video}
+	return &BinaryDumpSink{directory: directory, video: video, config: map[int][]byte{}}
 }
 
 func (s *BinaryDumpSink) WriteSample(track int, buf []byte, ptsMicroseconds int64, mediaCodecFlags int32) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// if it's a video keyframe, create a new file based on the pts.
-	if MediaCodecBufferFlag(mediaCodecFlags)&MediaCodecBufferFlagKeyFrame != 0 && track >= 0 && track < len(s.video) && s.video[track] {
+	flags := MediaCodecBufferFlag(mediaCodecFlags)
+	if flags&MediaCodecBufferFlagCodecConfig != 0 {
+		// not a frame, so it never starts a file. The caller may reuse buf.
+		s.config[track] = append([]byte(nil), buf...)
+	} else if flags&MediaCodecBufferFlagKeyFrame != 0 && track >= 0 && track < len(s.video) && s.video[track] {
 		if s.file != nil {
 			err := s.file.Close()
 			s.file = nil
@@ -120,6 +128,12 @@ func (s *BinaryDumpSink) WriteSample(track int, buf []byte, ptsMicroseconds int6
 			return err
 		}
 		s.file = file
+		// make the file decodable on its own.
+		for _, t := range slices.Sorted(maps.Keys(s.config)) {
+			if _, err := s.file.Write(encodeRecord(t, MediaCodecBufferFlagCodecConfig, ptsMicroseconds, s.config[t])); err != nil {
+				return err
+			}
+		}
 	}
 	// samples before the first keyframe can't be decoded, so drop them.
 	if s.file == nil {
@@ -211,13 +225,16 @@ func (r *BinaryDumpSampleReader) Close() error {
 	return r.file.Close()
 }
 
-// Next returns the next record, continuing into the next file at the end of the current one.
+// Next returns the next sample, skipping codec-config records and continuing into the next file at the end of the current one.
 // A truncated final record (e.g. after a crash) is treated as the end of its file. It returns
 // io.EOF once there are no more records.
 func (r *BinaryDumpSampleReader) Next() (*BinaryDumpSample, error) {
 	for {
 		sample, err := decodeRecord(r.file)
 		if err == nil {
+			if sample.Flags&MediaCodecBufferFlagCodecConfig != 0 {
+				continue
+			}
 			return sample, nil
 		}
 		if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {

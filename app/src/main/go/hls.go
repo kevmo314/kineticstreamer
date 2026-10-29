@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/bluenviron/mediacommon/pkg/codecs/h264"
 	"github.com/bluenviron/mediacommon/pkg/formats/mpegts"
 )
 
@@ -32,10 +31,6 @@ func NewHLSSink(diskSink *BinaryDumpSink, addr, bearerToken, encodedMediaFormatM
 		addr = hlsDefaultAddr
 	}
 	mediaFormatMimeTypes := strings.Split(encodedMediaFormatMimeTypes, ";")
-	codecs := make([]mpegts.Codec, len(mediaFormatMimeTypes))
-	for i, mediaFormatMimeType := range mediaFormatMimeTypes {
-		codecs[i] = MediaFormatMimeType(mediaFormatMimeType).MPEGTSCodec()
-	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /manifest.m3u8", func(w http.ResponseWriter, r *http.Request) {
@@ -88,7 +83,7 @@ func NewHLSSink(diskSink *BinaryDumpSink, addr, bearerToken, encodedMediaFormatM
 			}
 			defer f.Close()
 			w.Header().Set("Content-Type", "video/mp2t")
-			if err := writeSegment(w, f, codecs); err != nil {
+			if err := writeSegment(w, f, mediaFormatMimeTypes); err != nil {
 				log.Printf("hls segment %d: %v", pts, err)
 			}
 			return
@@ -121,14 +116,15 @@ func (s *HLSSink) Close() error {
 	return err
 }
 
-// writeSegment remuxes the records in r to MPEG-TS.
-func writeSegment(w io.Writer, r io.Reader, codecs []mpegts.Codec) error {
-	// the writer assigns the PIDs, so every segment needs its own tracks.
-	tracks := make([]*mpegts.Track, len(codecs))
-	for i, codec := range codecs {
-		tracks[i] = &mpegts.Track{Codec: codec}
+// writeSegment remuxes the records in r to MPEG-TS. Codec-config records provide the
+// SPS/PPS and AAC config, just like for the SRT sink.
+func writeSegment(w io.Writer, r io.Reader, mimeTypes []string) error {
+	// the writer assigns the PIDs and AAC config is per stream, so every segment needs its own tracks.
+	tracks := make([]*mpegts.Track, len(mimeTypes))
+	for i, m := range mimeTypes {
+		tracks[i] = &mpegts.Track{Codec: MediaFormatMimeType(m).MPEGTSCodec()}
 	}
-	mtw := mpegts.NewWriter(w, tracks)
+	mux := newTSMux(w, 64<<10, tracks)
 	for {
 		sample, err := decodeRecord(r)
 		if err != nil {
@@ -141,28 +137,8 @@ func writeSegment(w io.Writer, r io.Reader, codecs []mpegts.Codec) error {
 		if sample.Track >= len(tracks) {
 			continue
 		}
-		t := tracks[sample.Track]
-		// mpegts timestamps are in 90kHz.
-		pts := sample.PTS * 90 / 1000
-		switch t.Codec.(type) {
-		case *mpegts.CodecH264, *mpegts.CodecH265:
-			// the AnnexB framing is the same for both codecs.
-			nalus, err := h264.AnnexBUnmarshal(sample.Data)
-			if err != nil {
-				continue
-			}
-			err = mtw.WriteH26x(t, pts, pts, sample.Flags&MediaCodecBufferFlagKeyFrame != 0, nalus)
-			if err != nil {
-				return err
-			}
-		case *mpegts.CodecMPEG4Audio:
-			if err := mtw.WriteMPEG4Audio(t, pts, [][]byte{sample.Data}); err != nil {
-				return err
-			}
-		case *mpegts.CodecOpus:
-			if err := mtw.WriteOpus(t, pts, [][]byte{sample.Data}); err != nil {
-				return err
-			}
+		if err := mux.writeSample(tracks[sample.Track], sample.Data, sample.PTS, int32(sample.Flags)); err != nil {
+			return err
 		}
 	}
 }
