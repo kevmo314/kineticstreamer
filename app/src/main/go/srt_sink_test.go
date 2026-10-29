@@ -400,7 +400,7 @@ func TestSRTSink_CodecConfigDuringReconnect(t *testing.T) {
 	if err := sink.WriteSample(0, testAnnexB[:22], 0, int32(MediaCodecBufferFlagCodecConfig)); err != nil {
 		t.Fatal(err)
 	}
-	if len(sink.mux.paramSets) != 2 {
-		t.Errorf("param sets = %d, want 2: config buffer dropped while reconnecting", len(sink.mux.paramSets))
+	if len(sink.mux.paramSets[sink.tracks[0]]) != 2 {
+		t.Errorf("param sets = %d, want 2: config buffer dropped while reconnecting", len(sink.mux.paramSets[sink.tracks[0]]))
 	}
 }

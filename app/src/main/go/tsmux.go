@@ -23,7 +23,7 @@ type tsMux struct {
 	sawKeyframe bool
 	// Parameter sets from the encoder's codec-config buffer, prepended to keyframes
 	// that don't carry their own.
-	paramSets [][]byte
+	paramSets map[*mpegts.Track][][]byte
 }
 
 // newTSMux muxes into w, flushing after every sample in chunks of at most size.
@@ -41,6 +41,7 @@ func (m *tsMux) reset() {
 		*t = mpegts.Track{Codec: t.Codec}
 	}
 	m.sawKeyframe = false
+	m.paramSets = map[*mpegts.Track][][]byte{}
 	m.bw = bufio.NewWriterSize(m.w, m.size)
 	m.mpw = mpegts.NewWriter(m.bw, m.tracks)
 }
@@ -67,16 +68,16 @@ func (m *tsMux) writeSample(t *mpegts.Track, buf []byte, ptsMicroseconds int64, 
 		}
 		if isConfig {
 			// The caller owns buf and may reuse it (JNI), so keep copies.
-			m.paramSets = nil
+			m.paramSets[t] = nil
 			for _, n := range nalus {
-				m.paramSets = append(m.paramSets, append([]byte(nil), n...))
+				m.paramSets[t] = append(m.paramSets[t], append([]byte(nil), n...))
 			}
 			return nil
 		}
 		if isKeyframe {
 			m.sawKeyframe = true
-			if len(m.paramSets) > 0 && !isParamSet(t.Codec, nalus[0]) {
-				nalus = append(append([][]byte{}, m.paramSets...), nalus...)
+			if ps := m.paramSets[t]; len(ps) > 0 && !isParamSet(t.Codec, nalus[0]) {
+				nalus = append(append([][]byte{}, ps...), nalus...)
 			}
 		} else if !m.sawKeyframe {
 			return nil

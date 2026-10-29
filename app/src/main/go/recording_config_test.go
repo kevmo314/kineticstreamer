@@ -159,3 +159,28 @@ func TestHLSSegmentUsesRecordedAACConfig(t *testing.T) {
 		}
 	}
 }
+
+// Each video track keeps its own parameter sets.
+func TestTSMuxParameterSetsPerTrack(t *testing.T) {
+	a := &mpegts.Track{Codec: &mpegts.CodecH264{}}
+	b := &mpegts.Track{Codec: &mpegts.CodecH264{}}
+	w := &flakyWriter{}
+	m := newTSMux(w, 1316, []*mpegts.Track{a, b})
+	idr := []byte{0, 0, 0, 1, 0x65, 0x88, 0x84, 0x00, 0x33}
+	for _, s := range []struct {
+		t     *mpegts.Track
+		data  []byte
+		flags int32
+	}{
+		{a, []byte{0, 0, 0, 1, 0x67, 0xaa}, configFlag},
+		{b, []byte{0, 0, 0, 1, 0x67, 0xbb}, configFlag},
+		{a, idr, keyFrame},
+	} {
+		if err := m.writeSample(s.t, s.data, 0, s.flags); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := w.got.Bytes(); !bytes.Contains(got, []byte{0x67, 0xaa}) || bytes.Contains(got, []byte{0x67, 0xbb}) {
+		t.Error("track a's keyframe did not get exactly its own SPS")
+	}
+}
