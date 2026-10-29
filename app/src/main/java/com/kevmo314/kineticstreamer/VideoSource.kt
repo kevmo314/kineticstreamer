@@ -1,346 +1,279 @@
 package com.kevmo314.kineticstreamer
 
-import android.Manifest
 import android.content.Context
-import android.content.pm.PackageManager
 import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
 import android.hardware.usb.UsbDevice
-import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbManager
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
-import android.opengl.GLES11Ext
-import android.opengl.GLES20
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
-import androidx.core.app.ActivityCompat
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
-import java.util.concurrent.Executors
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.suspendCancellableCoroutine
+import java.io.Closeable
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
-import com.kevmo314.kineticstreamer.kinetic.UVCSource
-import com.kevmo314.kineticstreamer.kinetic.UVCStream
-import com.kevmo314.kineticstreamer.kinetic.FormatDescriptor
+import kotlin.coroutines.resume
 import com.kevmo314.kineticstreamer.kinetic.RTMPServer
 import com.kevmo314.kineticstreamer.kinetic.RTMPSource
-import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.flow.AbstractFlow
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.FlowCollector
-import kotlinx.coroutines.flow.callbackFlow
-import kotlinx.coroutines.channels.awaitClose
-import kotlin.coroutines.resume
-import kotlin.coroutines.suspendCoroutine
-import java.nio.ByteBuffer
-import java.util.concurrent.atomic.AtomicReference
-import java.util.concurrent.atomic.AtomicLong
-import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.LinkedBlockingQueue
-
-data class Quadruple<out A, out B, out C, out D>(
-    val first: A,
-    val second: B,
-    val third: C,
-    val fourth: D
-)
-
-fun createVideoTexture(): Int {
-    val texIds = IntArray(1)
-    GLES20.glGenTextures(1, texIds, 0)
-
-    val texId = texIds[0]
-    GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texId)
-
-    // Use NEAREST filtering to avoid bilinear artifacts at texture edges
-    GLES20.glTexParameteri(
-        GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
-        GLES20.GL_TEXTURE_MIN_FILTER,
-        GLES20.GL_NEAREST
-    )
-    GLES20.glTexParameteri(
-        GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
-        GLES20.GL_TEXTURE_MAG_FILTER,
-        GLES20.GL_NEAREST
-    )
-    GLES20.glTexParameteri(
-        GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
-        GLES20.GL_TEXTURE_WRAP_S,
-        GLES20.GL_CLAMP_TO_EDGE
-    )
-    GLES20.glTexParameteri(
-        GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
-        GLES20.GL_TEXTURE_WRAP_T,
-        GLES20.GL_CLAMP_TO_EDGE
-    )
-
-    GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, 0)
-    return texId
-}
+import com.kevmo314.kineticstreamer.kinetic.UVCSource
+import com.kevmo314.kineticstreamer.kinetic.UVCStream
 
 data class CameraSessionResult(val device: CameraDevice?, val session: CameraCaptureSession?)
 
+/**
+ * Opens [cameraId] and starts a repeating request into [outputSurface]. Resumes exactly once;
+ * the device is closed if the caller is cancelled or anything fails. Returns nulls on failure.
+ */
 @androidx.annotation.RequiresPermission(android.Manifest.permission.CAMERA)
-suspend fun openCamera(cameraManager: CameraManager, outputSurface: Surface, handler: Handler, cameraId: String): CameraSessionResult = suspendCoroutine { continuation ->
-    cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
-        override fun onOpened(camera: CameraDevice) {
-            val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-                addTarget(outputSurface)
-            }.build()
+suspend fun openCamera(cameraManager: CameraManager, outputSurface: Surface, handler: Handler, cameraId: String): CameraSessionResult = suspendCancellableCoroutine { continuation ->
+    val resumed = AtomicBoolean(false)
+    val device = AtomicReference<CameraDevice?>()
 
-            camera.createCaptureSession(
-                SessionConfiguration(
-                    SessionConfiguration.SESSION_REGULAR,
-                    mutableListOf<OutputConfiguration>().apply {
-                        add(OutputConfiguration(outputSurface))
-                    },
-                    Executors.newSingleThreadExecutor(),
-                    object : CameraCaptureSession.StateCallback() {
-                        override fun onConfigured(session: CameraCaptureSession) {
-                            session.setRepeatingRequest(request, null, handler)
-                            continuation.resume(CameraSessionResult(camera, session))
-                        }
-
-                        override fun onConfigureFailed(session: CameraCaptureSession) {
-                            Log.e("StreamingService", "Failed to configure camera session")
-                            camera.close()
-                            continuation.resume(CameraSessionResult(null, null))
-                        }
-                    }
-                )
-            )
+    fun finish(result: CameraSessionResult) {
+        if (resumed.compareAndSet(false, true)) {
+            // A cancelled caller never receives the result, so nobody else would close the device
+            if (result.device == null || !continuation.isActive) device.get()?.close()
+            continuation.resume(result)
         }
+    }
 
-        override fun onDisconnected(camera: CameraDevice) {
-            camera.close()
-            continuation.resume(CameraSessionResult(null, null))
-        }
+    continuation.invokeOnCancellation { device.get()?.close() }
 
-        override fun onError(camera: CameraDevice, error: Int) {
-            Log.e("StreamingService", "Camera error: $error")
-            camera.close()
-            continuation.resume(CameraSessionResult(null, null))
-        }
-    }, handler)
+    try {
+        cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
+            override fun onOpened(camera: CameraDevice) {
+                device.set(camera)
+                if (!continuation.isActive) { // cancelled while opening
+                    camera.close()
+                    return
+                }
+                try {
+                    val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+                        addTarget(outputSurface)
+                    }.build()
+                    camera.createCaptureSession(
+                        SessionConfiguration(
+                            SessionConfiguration.SESSION_REGULAR,
+                            listOf(OutputConfiguration(outputSurface)),
+                            { handler.post(it) },
+                            object : CameraCaptureSession.StateCallback() {
+                                override fun onConfigured(session: CameraCaptureSession) {
+                                    try {
+                                        session.setRepeatingRequest(request, null, handler)
+                                        finish(CameraSessionResult(camera, session))
+                                    } catch (e: Exception) {
+                                        Log.e("VideoSource", "Failed to start repeating request", e)
+                                        finish(CameraSessionResult(null, null))
+                                    }
+                                }
+
+                                override fun onConfigureFailed(session: CameraCaptureSession) {
+                                    Log.e("VideoSource", "Failed to configure camera session")
+                                    finish(CameraSessionResult(null, null))
+                                }
+                            }
+                        )
+                    )
+                } catch (e: Exception) {
+                    Log.e("VideoSource", "Failed to create camera session", e)
+                    finish(CameraSessionResult(null, null))
+                }
+            }
+
+            // After a successful open these just close the device; the flow's teardown closes the rest
+            override fun onDisconnected(camera: CameraDevice) {
+                camera.close()
+                finish(CameraSessionResult(null, null))
+            }
+
+            override fun onError(camera: CameraDevice, error: Int) {
+                Log.e("VideoSource", "Camera error: $error")
+                camera.close()
+                finish(CameraSessionResult(null, null))
+            }
+        }, handler)
+    } catch (e: Exception) {
+        Log.e("VideoSource", "Failed to open camera", e)
+        finish(CameraSessionResult(null, null))
+    }
 }
 
+/** An encoded frame and its presentation time in microseconds. */
+class FrameWithPTS(val data: ByteArray, val pts: Long)
 
-fun openUsbCamera(context: Context, device: UsbDevice, outputSurface: Surface, renderer: SurfaceTextureRenderer? = null): Quadruple<UsbDeviceConnection?, UVCStream?, Thread?, MediaCodec?> {
+// Dummy SPS/PPS sent first for OA4 compatibility
+private val OA4_SPS_PPS = (
+    "00000001" + "67640034ac4d00f0044fcb35010101400000fa00003a9803c70ca8" + "00000001" + "68ee3cb0"
+    ).chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+
+/**
+ * H.264 decoder rendering into a surface, fed by a thread pulling frames from [readFrame]
+ * (which returns null at end of stream). [closeSource] must unblock [readFrame].
+ */
+class H264DecoderPipeline(
+    tag: String,
+    outputSurface: Surface,
+    renderer: SurfaceTextureRenderer?,
+    readFrame: () -> FrameWithPTS?,
+    private val closeSource: () -> Unit,
+) : Closeable {
+    private val decoder: MediaCodec
+    private val feeder: DecoderFeeder
+    private val frameThread: Thread
+
+    init {
+        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, 1920, 1080).apply {
+            setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+            setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 1920 * 1080)
+            setInteger("vendor.qcom-ext-dec-input-buffer-count.value", 30) // Qualcomm specific
+            setInteger("input-buffer-count", 30)
+        }
+        decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+        feeder = DecoderFeeder { index, data, pts, flags ->
+            val buffer = decoder.getInputBuffer(index)
+            if (buffer == null || data.size > buffer.capacity()) {
+                Log.e(tag, "Dropping ${data.size} byte frame for input buffer ${buffer?.capacity()}")
+                decoder.queueInputBuffer(index, 0, 0, pts, flags)
+            } else {
+                buffer.clear()
+                buffer.put(data)
+                decoder.queueInputBuffer(index, 0, data.size, pts, flags)
+            }
+        }
+        decoder.setCallback(object : MediaCodec.Callback() {
+            override fun onInputBufferAvailable(codec: MediaCodec, index: Int) =
+                feeder.onInputBufferAvailable(index)
+
+            override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
+                try {
+                    codec.releaseOutputBuffer(index, info.size > 0)
+                } catch (e: IllegalStateException) {
+                    // decoder stopped by close()
+                }
+            }
+
+            override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
+                Log.e(tag, "Decoder error: ${e.message}")
+            }
+
+            override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
+                Log.i(tag, "Decoder output format: $format")
+                // Crop info lets the renderer account for padding when rotating
+                val height = format.getInteger(MediaFormat.KEY_HEIGHT)
+                val cropTop = if (format.containsKey("crop-top")) format.getInteger("crop-top") else 0
+                val cropBottom = if (format.containsKey("crop-bottom")) format.getInteger("crop-bottom") else height - 1
+                renderer?.setDecoderCrop(height, cropTop, cropBottom)
+            }
+        })
+        try {
+            decoder.configure(format, outputSurface, null, 0)
+            decoder.start()
+        } catch (e: Exception) {
+            decoder.release()
+            throw e
+        }
+
+        frameThread = thread(name = "$tag-frames") {
+            try {
+                feeder.feed(OA4_SPS_PPS, System.nanoTime() / 1000)
+                while (true) {
+                    val frame = readFrame() ?: break
+                    if (!feeder.feed(frame.data, frame.pts)) return@thread
+                }
+                Log.i(tag, "End of stream")
+                feeder.feed(ByteArray(0), 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+            } catch (e: InterruptedException) {
+                // closing
+            } catch (e: IllegalStateException) {
+                // decoder stopped while feeding
+            }
+        }
+    }
+
+    override fun close() {
+        feeder.close()
+        // Close the native source first: the reader may be blocked in JNI where interrupt does nothing
+        closeSource()
+        frameThread.join(2000)
+        if (frameThread.isAlive) {
+            Log.w("VideoSource", "Frame thread did not exit, interrupting")
+            frameThread.interrupt()
+        }
+        try {
+            decoder.stop()
+        } catch (e: Exception) {
+            Log.e("VideoSource", "Error stopping decoder: ${e.message}")
+        }
+        decoder.release()
+    }
+}
+
+private fun closeUvcSource(source: UVCSource) {
+    try {
+        source.close()
+    } catch (e: UnsatisfiedLinkError) {
+        // native UVCSource.close is only available once #19 lands
+        Log.w("VideoSource", "UVCSource.close not available: ${e.message}")
+    }
+}
+
+private fun openUsbCamera(context: Context, device: UsbDevice, outputSurface: Surface, renderer: SurfaceTextureRenderer?): Closeable? {
     val manager = context.getSystemService(Context.USB_SERVICE) as UsbManager
     val conn = manager.openDevice(device)
     if (conn == null) {
         Log.e("VideoSource", "Failed to open USB device")
-        return Quadruple(null, null, null, null)
+        return null
     }
 
-    // Claim video interfaces with force=true to detach kernel uvcvideo driver
-    // This leaves audio interfaces (2, 3, 4) for snd-usb-audio
-    for (i in 0 until device.interfaceCount) {
-        val iface = device.getInterface(i)
-        // Only claim UVC video interfaces (class 14 = Video)
-        if (iface.interfaceClass == 14) {
-            val claimed = conn.claimInterface(iface, true)
-            Log.i("VideoSource", "Claimed interface ${iface.id} (${iface.name}): $claimed")
+    var uvcSource: UVCSource? = null
+    var stream: UVCStream? = null
+    try {
+        // Claim video interfaces with force=true to detach kernel uvcvideo driver
+        // This leaves audio interfaces (2, 3, 4) for snd-usb-audio
+        for (i in 0 until device.interfaceCount) {
+            val iface = device.getInterface(i)
+            // Only claim UVC video interfaces (class 14 = Video)
+            if (iface.interfaceClass == 14) {
+                val claimed = conn.claimInterface(iface, true)
+                Log.i("VideoSource", "Claimed interface ${iface.id} (${iface.name}): $claimed")
+            }
         }
-    }
 
-    // Initialize UVC source
-    val uvcSource = UVCSource(conn.fileDescriptor)
-
-    val stream = uvcSource.startStreaming(
-        8, 1920, 1080, 30
-    )
-
-    val (thread, decoder) = startUvcFrameProcessing(stream, outputSurface, renderer)
-
-    return Quadruple(conn, stream, thread, decoder)
-}
-
-// Data class to hold frame data and its PTS
-data class FrameWithPTS(val data: ByteArray, val pts: Long, val eof: Boolean = false)
-
-fun startUvcFrameProcessing(stream: UVCStream, outputSurface: Surface, renderer: SurfaceTextureRenderer? = null): Pair<Thread, MediaCodec> {
-    val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, 1920, 1080)
-    // Set additional format parameters for H264 from USB cameras
-    format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
-    format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 1920 * 1080) // Set max input size
-    // Request more input buffers if possible
-    format.setInteger("vendor.qcom-ext-dec-input-buffer-count.value", 30) // Qualcomm specific
-    format.setInteger("input-buffer-count", 30)
-
-    var sentOA4PPS = false
-
-    // Queue frames to avoid dropping P-frames (which causes decoding artifacts)
-    // H.264 P-frames reference previous frames, so we can't skip any
-    // Capacity of 30 = 1 second of buffer at 30fps
-    val frameQueue = LinkedBlockingQueue<FrameWithPTS>(30)
-
-    val decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).apply {
-        setCallback(object : MediaCodec.Callback() {
-            override fun onInputBufferAvailable(
-                codec: MediaCodec,
-                index: Int
-            ) {
-                if (!sentOA4PPS) {
-                    // write dummy sps, OA4 compatibility
-                    val inputBuffer = codec.getInputBuffer(index)
-                    inputBuffer?.clear()
-                    // 00 00 00 01 67 64 00 34 ac 4d 00 f0 04 4f cb 35 01 01 01 40 00 00 fa 00 00 3a 98 03 c7 0c a8 00 00 00 01 68 ee 3c b0
-                    val data = byteArrayOf(
-                        0x00.toByte(),
-                        0x00.toByte(),
-                        0x00.toByte(),
-                        0x01.toByte(),
-                        0x67.toByte(),
-                        0x64.toByte(),
-                        0x00.toByte(),
-                        0x34.toByte(),
-                        0xac.toByte(),
-                        0x4d.toByte(),
-                        0x00.toByte(),
-                        0xf0.toByte(),
-                        0x04.toByte(),
-                        0x4f.toByte(),
-                        0xcb.toByte(),
-                        0x35.toByte(),
-                        0x01.toByte(),
-                        0x01.toByte(),
-                        0x01.toByte(),
-                        0x40.toByte(),
-                        0x00.toByte(),
-                        0x00.toByte(),
-                        0xfa.toByte(),
-                        0x00.toByte(),
-                        0x00.toByte(),
-                        0x3a.toByte(),
-                        0x98.toByte(),
-                        0x03.toByte(),
-                        0xc7.toByte(),
-                        0x0c.toByte(),
-                        0xa8.toByte(),
-                        0x00.toByte(),
-                        0x00.toByte(),
-                        0x00.toByte(),
-                        0x01.toByte(),
-                        0x68.toByte(),
-                        0xee.toByte(),
-                        0x3c.toByte(),
-                        0xb0.toByte()
-                    )
-
-                    inputBuffer?.put(data)
-                    codec.queueInputBuffer(
-                        index,
-                        0,
-                        data.size,
-                        System.nanoTime() / 1000,
-                        0
-                    )
-                    sentOA4PPS = true
-                    return
-                }
-
-                // Poll for a frame (non-blocking to keep MediaCodec happy)
-                val frameWithPTS = frameQueue.poll()
-                if (frameWithPTS == null) {
-                    // No frame available yet, queue empty buffer to keep decoder cycling
-                    codec.queueInputBuffer(index, 0, 0, 0, 0)
-                    return
-                }
-
-                // Check for EOF
-                if (frameWithPTS.eof) {
-                    Log.w("VideoSource", "Received EOF marker, stopping decoder")
-                    codec.stop()
-                    return
-                }
-
-                // Queue input buffer with frame-based PTS
-                val inputBuffer = codec.getInputBuffer(index)
-                if (inputBuffer != null) {
-                    inputBuffer.clear()
-                    inputBuffer.put(frameWithPTS.data)
-                    codec.queueInputBuffer(
-                        index,
-                        0,
-                        frameWithPTS.data.size,
-                        frameWithPTS.pts,  // Use PTS from UVC stream
-                        0
-                    )
-                } else {
-                    Log.e("VideoSource", "Decoder input buffer is null at index $index")
-                }
-            }
-
-            override fun onOutputBufferAvailable(
-                codec: MediaCodec,
-                index: Int,
-                info: MediaCodec.BufferInfo
-            ) {
-                codec.releaseOutputBuffer(index, true)
-            }
-
-            override fun onError(
-                codec: MediaCodec,
-                e: MediaCodec.CodecException
-            ) {
-                Log.e("VideoSource", "Decoder error: ${e.message}")
-            }
-
-            override fun onOutputFormatChanged(
-                codec: MediaCodec,
-                format: MediaFormat
-            ) {
-                Log.i("VideoSource", "Decoder output format: $format")
-                // Extract crop rect to determine padding
-                val width = format.getInteger(MediaFormat.KEY_WIDTH)
-                val height = format.getInteger(MediaFormat.KEY_HEIGHT)
-                val cropLeft = if (format.containsKey("crop-left")) format.getInteger("crop-left") else 0
-                val cropTop = if (format.containsKey("crop-top")) format.getInteger("crop-top") else 0
-                val cropRight = if (format.containsKey("crop-right")) format.getInteger("crop-right") else width - 1
-                val cropBottom = if (format.containsKey("crop-bottom")) format.getInteger("crop-bottom") else height - 1
-                val cropWidth = cropRight - cropLeft + 1
-                val cropHeight = cropBottom - cropTop + 1
-                Log.i("VideoSource", "Decoder buffer: ${width}x${height}, crop: ($cropLeft,$cropTop)-($cropRight,$cropBottom), content: ${cropWidth}x${cropHeight}")
-                Log.i("VideoSource", "Padding - top: $cropTop, bottom: ${height - cropBottom - 1}, left: $cropLeft, right: ${width - cropRight - 1}")
-
-                // Pass crop info to renderer for padding adjustment when rotating
-                renderer?.setDecoderCrop(height, cropTop, cropBottom)
-            }
-
-        })
-        configure(format, outputSurface, null, 0)
-        start()
-    }
-
-    val frameThread = thread {
-        while (!Thread.currentThread().isInterrupted) {
-            val frameData = stream.readFrame()
-            if (frameData == null) {
-                // Signal EOF and exit
-                frameQueue.put(FrameWithPTS(ByteArray(0), 0, true))
-                break
-            }
-            // Get arrival time in CLOCK_MONOTONIC nanoseconds, convert to microseconds for MediaCodec
-            // This is the same clock as AudioRecord.getTimestamp(TIMEBASE_MONOTONIC)
-            val arrivalTimeNs = stream.getArrivalTimeNs()
-            val pts = arrivalTimeNs / 1000  // Convert nanos to micros
-            // Queue frame (blocks if queue is full, applying backpressure to USB)
-            frameQueue.put(FrameWithPTS(frameData, pts, false))
+        val source = UVCSource(conn.fileDescriptor).also { uvcSource = it }
+        val uvc = source.startStreaming(8, 1920, 1080, 30).also { stream = it }
+        val pipeline = H264DecoderPipeline(
+            "UvcDecoder", outputSurface, renderer,
+            // Arrival time is CLOCK_MONOTONIC, the clock AudioRecord timestamps use
+            { uvc.readFrame()?.let { FrameWithPTS(it, uvc.getArrivalTimeNs() / 1000) } },
+            { uvc.close() },
+        )
+        return Closeable {
+            pipeline.close() // closes the stream
+            closeUvcSource(source) // releases the USB device claim
+            conn.close()
         }
+    } catch (e: Throwable) {
+        stream?.close()
+        uvcSource?.let { closeUvcSource(it) }
+        conn.close()
+        throw e
     }
-
-    return Pair(frameThread, decoder)
 }
 
 /**
@@ -464,170 +397,11 @@ fun RtmpAudioSource(rtmpSourceRef: AtomicReference<RTMPSource?>): Flow<Timestamp
 }
 
 /**
- * Start RTMP video frame processing using the given RTMPSource.
- * This function is similar to startUvcFrameProcessing but reads from RTMP instead of UVC.
- */
-fun startRtmpFrameProcessing(rtmpSource: RTMPSource, outputSurface: Surface, renderer: SurfaceTextureRenderer? = null): Pair<Thread, MediaCodec> {
-    val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, 1920, 1080)
-    format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
-    format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 1920 * 1080)
-    format.setInteger("vendor.qcom-ext-dec-input-buffer-count.value", 30)
-    format.setInteger("input-buffer-count", 30)
-
-    var sentOA4PPS = false
-    val frameQueue = LinkedBlockingQueue<FrameWithPTS>(30)
-
-    val decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC).apply {
-        setCallback(object : MediaCodec.Callback() {
-            override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {
-                if (!sentOA4PPS) {
-                    val inputBuffer = codec.getInputBuffer(index)
-                    inputBuffer?.clear()
-                    // Dummy SPS/PPS for OA4 compatibility
-                    val data = byteArrayOf(
-                        0x00.toByte(), 0x00.toByte(), 0x00.toByte(), 0x01.toByte(),
-                        0x67.toByte(), 0x64.toByte(), 0x00.toByte(), 0x34.toByte(),
-                        0xac.toByte(), 0x4d.toByte(), 0x00.toByte(), 0xf0.toByte(),
-                        0x04.toByte(), 0x4f.toByte(), 0xcb.toByte(), 0x35.toByte(),
-                        0x01.toByte(), 0x01.toByte(), 0x01.toByte(), 0x40.toByte(),
-                        0x00.toByte(), 0x00.toByte(), 0xfa.toByte(), 0x00.toByte(),
-                        0x00.toByte(), 0x3a.toByte(), 0x98.toByte(), 0x03.toByte(),
-                        0xc7.toByte(), 0x0c.toByte(), 0xa8.toByte(), 0x00.toByte(),
-                        0x00.toByte(), 0x00.toByte(), 0x01.toByte(), 0x68.toByte(),
-                        0xee.toByte(), 0x3c.toByte(), 0xb0.toByte()
-                    )
-                    inputBuffer?.put(data)
-                    codec.queueInputBuffer(index, 0, data.size, System.nanoTime() / 1000, 0)
-                    sentOA4PPS = true
-                    return
-                }
-
-                val frameWithPTS = frameQueue.poll()
-                if (frameWithPTS == null) {
-                    codec.queueInputBuffer(index, 0, 0, 0, 0)
-                    return
-                }
-
-                if (frameWithPTS.eof) {
-                    Log.w("VideoSource", "RTMP: Received EOF marker, stopping decoder")
-                    codec.stop()
-                    return
-                }
-
-                val inputBuffer = codec.getInputBuffer(index)
-                if (inputBuffer != null) {
-                    inputBuffer.clear()
-                    inputBuffer.put(frameWithPTS.data)
-                    codec.queueInputBuffer(index, 0, frameWithPTS.data.size, frameWithPTS.pts, 0)
-                } else {
-                    Log.e("VideoSource", "RTMP: Decoder input buffer is null at index $index")
-                }
-            }
-
-            override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
-                codec.releaseOutputBuffer(index, true)
-            }
-
-            override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
-                Log.e("VideoSource", "RTMP decoder error: ${e.message}")
-            }
-
-            override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
-                Log.i("VideoSource", "RTMP decoder output format: $format")
-                val width = format.getInteger(MediaFormat.KEY_WIDTH)
-                val height = format.getInteger(MediaFormat.KEY_HEIGHT)
-                val cropLeft = if (format.containsKey("crop-left")) format.getInteger("crop-left") else 0
-                val cropTop = if (format.containsKey("crop-top")) format.getInteger("crop-top") else 0
-                val cropRight = if (format.containsKey("crop-right")) format.getInteger("crop-right") else width - 1
-                val cropBottom = if (format.containsKey("crop-bottom")) format.getInteger("crop-bottom") else height - 1
-                val cropWidth = cropRight - cropLeft + 1
-                val cropHeight = cropBottom - cropTop + 1
-                Log.i("VideoSource", "RTMP decoder buffer: ${width}x${height}, crop: ($cropLeft,$cropTop)-($cropRight,$cropBottom), content: ${cropWidth}x${cropHeight}")
-                renderer?.setDecoderCrop(height, cropTop, cropBottom)
-            }
-        })
-        configure(format, outputSurface, null, 0)
-        start()
-    }
-
-    val frameThread = thread {
-        Log.i("VideoSource", "RTMP frame reader thread started")
-        while (!Thread.currentThread().isInterrupted && !rtmpSource.isClosed()) {
-            val frameData = rtmpSource.readVideoFrame()
-            if (frameData == null) {
-                Log.i("VideoSource", "RTMP: No frame received (source may be closed)")
-                frameQueue.put(FrameWithPTS(ByteArray(0), 0, true))
-                break
-            }
-            val pts = rtmpSource.getVideoPTS()
-            frameQueue.put(FrameWithPTS(frameData, pts, false))
-        }
-        Log.i("VideoSource", "RTMP frame reader thread exiting")
-    }
-
-    return Pair(frameThread, decoder)
-}
-
-// Helper function to validate H264 NAL units
-private fun validateH264Frame(data: ByteArray): Pair<Boolean, String> {
-    if (data.size < 4) {
-        return Pair(false, "Frame too small")
-    }
-    
-    // Check for start codes (0x00 0x00 0x00 0x01 or 0x00 0x00 0x01)
-    var hasStartCode = false
-    if (data[0] == 0x00.toByte() && data[1] == 0x00.toByte()) {
-        if (data[2] == 0x01.toByte() || (data[2] == 0x00.toByte() && data.size > 3 && data[3] == 0x01.toByte())) {
-            hasStartCode = true
-        }
-    }
-    
-    if (!hasStartCode) {
-        // Check if it might be length-prefixed format (used by some cameras)
-        val possibleLength = ((data[0].toInt() and 0xFF) shl 24) or
-                           ((data[1].toInt() and 0xFF) shl 16) or
-                           ((data[2].toInt() and 0xFF) shl 8) or
-                           (data[3].toInt() and 0xFF)
-        if (possibleLength > 0 && possibleLength <= data.size - 4) {
-            return Pair(true, "Length-prefixed format")
-        }
-        return Pair(false, "No valid start code or length prefix")
-    }
-    
-    // Find NAL unit type
-    val nalStartOffset = if (data[2] == 0x01.toByte()) 3 else 4
-    if (data.size <= nalStartOffset) {
-        return Pair(false, "No NAL unit data after start code")
-    }
-    
-    val nalUnitType = data[nalStartOffset].toInt() and 0x1F
-    val nalRefIdc = (data[nalStartOffset].toInt() shr 5) and 0x03
-    
-    // Validate NAL unit type (1-23 are valid for H.264)
-    if (nalUnitType == 0 || nalUnitType > 23) {
-        return Pair(false, "Invalid NAL unit type: $nalUnitType")
-    }
-    
-    // Check for corrupted data patterns
-    var zeroCount = 0
-    var ffCount = 0
-    for (i in nalStartOffset until minOf(nalStartOffset + 100, data.size)) {
-        if (data[i] == 0x00.toByte()) zeroCount++
-        if (data[i] == 0xFF.toByte()) ffCount++
-    }
-    
-    if (zeroCount > 90 || ffCount > 90) {
-        return Pair(false, "Suspicious data pattern (too many 0x00 or 0xFF bytes)")
-    }
-    
-    return Pair(true, "Valid NAL type: $nalUnitType, ref_idc: $nalRefIdc")
-}
-/**
  * VideoSource represents a persistent video source that manages the
  * camera device (or USB camera) and its associated resources.
  *
- * If a renderer is provided, frames are rendered directly on the GL thread
- * for perfect frame synchronization (no duplication/dropping).
+ * Frames are rendered directly on the renderer's GL thread for perfect frame
+ * synchronization (no duplication/dropping), so a renderer is required.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 @androidx.annotation.RequiresPermission(
@@ -637,124 +411,128 @@ fun VideoSource(context: Context,
                 device: VideoSourceDevice,
                 renderer: SurfaceTextureRenderer? = null,
                 rtmpSourceRef: AtomicReference<RTMPSource?>? = null): Flow<SurfaceTexture> = callbackFlow {
-    var cameraDevice: CameraDevice? = null
-    var captureSession: CameraCaptureSession? = null
+    checkNotNull(renderer) { "VideoSource requires a renderer" }
 
-    var activeUsbDeviceConnection: UsbDeviceConnection? = null
-    var activeUvcStream: UVCStream? = null
-    var activeDecoder: MediaCodec? = null
-    var activeUvcThread: Thread? = null
-
-    // RTMP source state
-    var activeRtmpServer: RTMPServer? = null
-    var activeRtmpSource: RTMPSource? = null
-    var activeRtmpThread: Thread? = null
-    val outputSurfaceTexture = SurfaceTexture(createVideoTexture()).apply {
-        // Set buffer size to 1088 (macroblock-aligned) to match H.264 decoder output.
-        // This avoids scaling in the transform matrix - the 1080p encoder surface
-        // will naturally crop the bottom 8 padding pixels during rendering.
-        setDefaultBufferSize(1920, 1088)
-        Log.i("VideoSource", "Created SurfaceTexture with buffer size 1920x1088 (macroblock aligned)")
-    }
-    val outputSurface = Surface(outputSurfaceTexture)
-
-    val handlerThread by lazy {
-        HandlerThread("CameraSource").apply {
-            start()
+    // Closed in reverse order of registration. Resources registered after teardown
+    // (e.g. by the RTMP waiter thread) are closed immediately.
+    val resources = ArrayDeque<Closeable>()
+    var closed = false
+    fun register(resource: Closeable) {
+        val closeNow = synchronized(resources) {
+            if (!closed) resources.addFirst(resource)
+            closed
         }
+        if (closeNow) resource.close()
     }
-
-    val handler by lazy {
-        Handler(handlerThread.looper)
-    }
-
-    when (device) {
-        is VideoSourceDevice.UsbCamera -> {
-            Log.i("VideoSource", "Opening USB camera: ${device.usbDevice.productName}")
-            val (conn, uvcStream, thread, decoder) = openUsbCamera(context, device.usbDevice, outputSurface, renderer)
-            activeUsbDeviceConnection = conn
-            activeUvcStream = uvcStream
-            activeUvcThread = thread
-            activeDecoder = decoder
+    fun closeAll() {
+        val toClose = synchronized(resources) {
+            closed = true
+            resources.toList().also { resources.clear() }
         }
-        is VideoSourceDevice.Camera -> {
-            val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-            val characteristics = cameraManager.getCameraCharacteristics(device.cameraId)
-            val sensorOrientation = characteristics.get(android.hardware.camera2.CameraCharacteristics.SENSOR_ORIENTATION)
-            val streamConfigMap = characteristics.get(android.hardware.camera2.CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-            val outputSizes = streamConfigMap?.getOutputSizes(android.graphics.SurfaceTexture::class.java)
-            Log.i("VideoSource", "Opening camera ${device.cameraId}, sensor orientation: $sensorOrientation")
-            Log.i("VideoSource", "Available output sizes: ${outputSizes?.take(5)?.joinToString()}")
-            val result = openCamera(cameraManager, outputSurface, handler, device.cameraId)
-            cameraDevice = result.device
-            captureSession = result.session
-        }
-        is VideoSourceDevice.RtmpServer -> {
-            Log.i("VideoSource", "Starting RTMP server on port ${device.port}")
-            val server = RTMPServer(device.port)
-            if (!server.start()) {
-                Log.e("VideoSource", "Failed to start RTMP server")
-                close()
-                return@callbackFlow
+        toClose.forEach {
+            try {
+                it.close()
+            } catch (e: Exception) {
+                Log.e("VideoSource", "Error closing resource: ${e.message}")
             }
-            activeRtmpServer = server
-            Log.i("VideoSource", "RTMP server started, waiting for publisher...")
+        }
+    }
 
-            // Wait for a publisher to connect (blocking in background thread)
-            thread {
-                val source = server.waitForSource(60000) // Wait up to 60 seconds
-                if (source != null) {
-                    Log.i("VideoSource", "RTMP publisher connected!")
-                    activeRtmpSource = source
-                    // Share the source with audio pipeline
-                    rtmpSourceRef?.set(source)
-                    val (rtmpThread, decoder) = startRtmpFrameProcessing(source, outputSurface, renderer)
-                    activeRtmpThread = rtmpThread
-                    activeDecoder = decoder
+    // Buffer size 1088 (macroblock-aligned) matches the H.264 decoder output. This avoids scaling
+    // in the transform matrix - the 1080p encoder surface will naturally crop the bottom 8 padding
+    // pixels during rendering.
+    val outputSurfaceTexture = renderer.createVideoSurfaceTexture(1920, 1088)
+    val outputSurface = Surface(outputSurfaceTexture)
+    register {
+        outputSurfaceTexture.setOnFrameAvailableListener(null)
+        // Release on the GL thread so it cannot race a frame being rendered
+        val release = Runnable {
+            outputSurface.release()
+            outputSurfaceTexture.release()
+        }
+        if (!renderer.glHandler.post(release)) release.run()
+    }
+
+    try {
+        renderer.timestampOffsetNanos = 0
+        when (device) {
+            is VideoSourceDevice.UsbCamera -> {
+                Log.i("VideoSource", "Opening USB camera: ${device.usbDevice.productName}")
+                openUsbCamera(context, device.usbDevice, outputSurface, renderer)?.let { register(it) }
+            }
+            is VideoSourceDevice.Camera -> {
+                val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+                val characteristics = cameraManager.getCameraCharacteristics(device.cameraId)
+                Log.i("VideoSource", "Opening camera ${device.cameraId}, sensor orientation: ${characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION)}")
+                renderer.timestampOffsetNanos = cameraTimestampOffsetNs(
+                    characteristics.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE),
+                    System.nanoTime(),
+                    SystemClock.elapsedRealtimeNanos(),
+                )
+                val handlerThread = HandlerThread("CameraSource").apply { start() }
+                register { handlerThread.quitSafely() }
+                val result = openCamera(cameraManager, outputSurface, Handler(handlerThread.looper), device.cameraId)
+                if (result.device == null) {
+                    Log.e("VideoSource", "Camera ${device.cameraId} failed to open")
                 } else {
-                    Log.w("VideoSource", "No RTMP publisher connected within timeout")
+                    register {
+                        result.session?.close()
+                        result.device.close()
+                    }
+                }
+            }
+            is VideoSourceDevice.RtmpServer -> {
+                Log.i("VideoSource", "Starting RTMP server on port ${device.port}")
+                val server = RTMPServer(device.port)
+                register(server)
+                if (!server.start()) {
+                    Log.e("VideoSource", "Failed to start RTMP server")
+                    closeAll()
+                    close()
+                    return@callbackFlow
+                }
+                Log.i("VideoSource", "RTMP server started, waiting for publisher...")
+
+                // Wait for a publisher to connect (blocking in background thread)
+                thread(name = "RtmpWaiter") {
+                    var source: RTMPSource? = null
+                    try {
+                        source = server.waitForSource(60000) // Wait up to 60 seconds
+                        if (source == null) {
+                            Log.w("VideoSource", "No RTMP publisher connected within timeout")
+                            return@thread
+                        }
+                        val src: RTMPSource = source
+                        Log.i("VideoSource", "RTMP publisher connected!")
+                        // Share the source with audio pipeline
+                        rtmpSourceRef?.set(src)
+                        register(
+                            H264DecoderPipeline(
+                                "RtmpDecoder", outputSurface, renderer,
+                                { if (src.isClosed()) null else src.readVideoFrame()?.let { FrameWithPTS(it, src.getVideoPTS()) } },
+                                { src.close() },
+                            )
+                        )
+                    } catch (e: Exception) {
+                        // e.g. the surface was released because the flow closed meanwhile
+                        source?.close()
+                        rtmpSourceRef?.compareAndSet(source, null)
+                        Log.e("VideoSource", "Failed to start RTMP decoder: ${e.message}")
+                    }
                 }
             }
         }
+    } catch (t: Throwable) {
+        closeAll()
+        throw t
     }
 
-    if (renderer != null) {
-        // Direct rendering mode: render immediately on GL thread
-        // This ensures 1:1 frame correspondence (no duplication/dropping)
-        outputSurfaceTexture.setOnFrameAvailableListener({ st ->
-            renderer.renderFrame(st)
-        }, renderer.glHandler)
-        // Send once to signal the flow is active (for lifecycle management)
-        trySend(outputSurfaceTexture)
-    } else {
-        // Flow mode: send frames through the channel (may drop/duplicate)
-        outputSurfaceTexture.setOnFrameAvailableListener {
-            trySend(it)
-        }
-    }
+    // Render immediately on the GL thread: 1:1 frame correspondence (no duplication/dropping)
+    outputSurfaceTexture.setOnFrameAvailableListener({ st ->
+        renderer.renderFrame(st)
+    }, renderer.glHandler)
+    // Send once to signal the flow is active (for lifecycle management)
+    trySend(outputSurfaceTexture)
 
-    awaitClose {
-        // Stop the frame reading threads first
-        activeUvcThread?.interrupt()
-        activeUvcThread?.join()
-        activeRtmpThread?.interrupt()
-        activeRtmpThread?.join()
-        // Stop and release the decoder before releasing surfaces
-        try {
-            activeDecoder?.stop()
-        } catch (e: Exception) {
-            Log.e("VideoSource", "Error stopping decoder: ${e.message}")
-        }
-        activeDecoder?.release()
-        activeUvcStream?.close()
-        activeUsbDeviceConnection?.close()
-        // Clean up RTMP resources
-        activeRtmpSource?.close()
-        activeRtmpServer?.close()
-        captureSession?.close()
-        cameraDevice?.close()
-        outputSurface.release()
-        outputSurfaceTexture.release()
-        handlerThread.quitSafely()
-    }
+    awaitClose { closeAll() }
 }
