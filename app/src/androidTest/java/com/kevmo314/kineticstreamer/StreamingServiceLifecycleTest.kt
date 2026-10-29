@@ -11,6 +11,7 @@ import androidx.core.content.ContextCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.rule.GrantPermissionRule
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertFalse
@@ -50,11 +51,16 @@ class StreamingServiceLifecycleTest {
         }
     }
 
+    private suspend fun setOnlyOutput(output: OutputConfiguration) {
+        val outputs = Settings(DataStoreProvider.getDataStore(context)).outputs
+        repeat(outputs.configurations.first().size) { outputs.remove(0) }
+        outputs.add(output)
+    }
+
     @Before
     fun setUp() {
         runBlocking {
-            Settings(DataStoreProvider.getDataStore(context))
-                .setOutputConfigurations(listOf(OutputConfiguration("srt://127.0.0.1:1", true)))
+            setOnlyOutput(OutputConfiguration("srt://127.0.0.1:1", true))
         }
         val intent = Intent(context, StreamingService::class.java)
         ContextCompat.startForegroundService(context, intent)
@@ -80,8 +86,7 @@ class StreamingServiceLifecycleTest {
     @Test
     fun repeatedSuccessfulStartsDoNotLeak() {
         runBlocking {
-            Settings(DataStoreProvider.getDataStore(context))
-                .setOutputConfigurations(listOf(OutputConfiguration("srt://127.0.0.1:1", false)))
+            setOnlyOutput(OutputConfiguration("srt://127.0.0.1:1", false))
         }
         cycle(failing = false)
     }

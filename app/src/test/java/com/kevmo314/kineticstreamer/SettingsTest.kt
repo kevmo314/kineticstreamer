@@ -72,7 +72,7 @@ class SettingsTest {
     @Test
     fun outputConfiguration_roundTripsUrlContainingColons() {
         val c = OutputConfiguration("srt://host:9000?streamid=a:b", true)
-        assertEquals(c, OutputConfiguration.fromString(c.toString()))
+        assertEquals(c, OutputConfiguration.decode(c.encode()))
         assertEquals("SRT", c.protocol)
     }
 
@@ -96,7 +96,7 @@ class SettingsTest {
         s.setCodec(SupportedVideoCodec.AV1)
         s.setResolution(Resolution(1280, 720))
         s.setBitrate(4_000_000)
-        s.setOutputConfigurations(outputs)
+        outputs.forEach { s.outputs.add(it) }
         assertEquals(SupportedVideoCodec.AV1, s.codec.first())
         assertEquals(Resolution(1280, 720), s.resolution.first())
         assertEquals(4_000_000, s.bitrate.first())

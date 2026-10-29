@@ -100,6 +100,13 @@ jobs:
           ANDROID_NDK: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
 
+      - name: Check JNI symbols
+        if: runner.os == 'Linux'
+        run: |
+          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
+            scripts/check-jni-symbols.sh app/src/main/jniLibs/$abi/libkinetic.so
+          done
+
       # Only upload from Linux. macOS/Windows runs are just verifying the build works.
       - name: Upload APK
         if: runner.os == 'Linux'

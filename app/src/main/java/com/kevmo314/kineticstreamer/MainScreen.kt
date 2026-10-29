@@ -1,8 +1,10 @@
 package com.kevmo314.kineticstreamer
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
-import android.os.Build
+import android.content.Intent
+import android.net.Uri
 import android.util.Log
 import android.view.Surface
 import android.view.SurfaceHolder
@@ -31,6 +33,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -44,20 +47,23 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.withContext
 
-val REQUIRED_PERMISSIONS =
-    mutableListOf(
-        Manifest.permission.CAMERA,
-        Manifest.permission.RECORD_AUDIO
-    ).apply {
-        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
-            add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-        }
-    }
+val REQUIRED_PERMISSIONS = listOf(
+    Manifest.permission.CAMERA,
+    Manifest.permission.RECORD_AUDIO
+)
+
+// Notifications are requested too, but only camera and mic gate the app.
+// The constant is just a string, so it is safe below API 33 (the request is simply denied).
+@SuppressLint("InlinedApi")
+val REQUESTED_PERMISSIONS = REQUIRED_PERMISSIONS + Manifest.permission.POST_NOTIFICATIONS
+
+private data class StreamStats(val bitrate: Int, val fps: Float, val ice: String, val peer: String)
+
 @Composable
 fun MainScreen(
     settings: Settings,
@@ -65,21 +71,32 @@ fun MainScreen(
     requiredPermissionsGranted: Boolean,
     requestRequiredPermissions: () -> Unit,
     navigateToSettings: () -> Unit) {
+    val context = LocalContext.current
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = Color.Black
     ) {
         if (!requiredPermissionsGranted) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Button(onClick = requestRequiredPermissions) {
-                    Text("Grant camera and microphone access")
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Button(onClick = requestRequiredPermissions) {
+                        Text("Grant camera and microphone access")
+                    }
+                    // After a permanent denial the system dialog no longer appears.
+                    TextButton(onClick = {
+                        context.startActivity(
+                            Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", context.packageName, null))
+                        )
+                    }) {
+                        Text("Open app settings")
+                    }
                 }
             }
         } else {
             val cameraSelectorDialogOpen = remember { mutableStateOf(false) }
             val coroutineScope = rememberCoroutineScope()
 
-            val applicationContext = LocalContext.current
+            val applicationContext = context
 
             val stub = streamingService
             val previewSurface = remember { mutableStateOf<Surface?>(null) }
@@ -94,7 +111,13 @@ fun MainScreen(
             }
 
             if (stub != null) {
-                val isStreaming = remember(stub) { mutableStateOf(stub.isStreaming) }
+                val isStreaming = remember(stub) { mutableStateOf(false) }
+                // Binder calls block, so keep them off the main thread.
+                LaunchedEffect(stub) {
+                    isStreaming.value = withContext(Dispatchers.IO) { stub.isStreaming }
+                }
+                // The service's start/stop aren't reentrant, so ignore taps while one is running.
+                val transitioning = remember(stub) { mutableStateOf(false) }
                 val currentBitrate = remember { mutableIntStateOf(0) }
                 val currentFps = remember { mutableStateOf(0f) }
                 val audioLevels = remember { mutableStateOf(emptyList<Float>()) }
@@ -102,7 +125,7 @@ fun MainScreen(
                 val peerConnectionState = remember { mutableStateOf("") }
                 
                 // Set up audio level callback
-                LaunchedEffect(stub) {
+                DisposableEffect(stub) {
                     stub.setAudioLevelCallback(object : IAudioLevelCallback.Stub() {
                         override fun onAudioLevels(levels: FloatArray?) {
                             levels?.let {
@@ -110,16 +133,25 @@ fun MainScreen(
                             }
                         }
                     })
+                    onDispose { stub.setAudioLevelCallback(null) }
                 }
                 
                 // Periodically update bitrate, FPS, and connection states when streaming
                 LaunchedEffect(isStreaming.value) {
                     if (isStreaming.value) {
                         while (isStreaming.value) {
-                            currentBitrate.intValue = stub.currentBitrate
-                            currentFps.value = stub.currentFps
-                            iceConnectionState.value = stub.whipIceConnectionState ?: ""
-                            peerConnectionState.value = stub.whipPeerConnectionState ?: ""
+                            val stats = withContext(Dispatchers.IO) {
+                                StreamStats(
+                                    stub.currentBitrate,
+                                    stub.currentFps,
+                                    stub.whipIceConnectionState ?: "",
+                                    stub.whipPeerConnectionState ?: "",
+                                )
+                            }
+                            currentBitrate.intValue = stats.bitrate
+                            currentFps.value = stats.fps
+                            iceConnectionState.value = stats.ice
+                            peerConnectionState.value = stats.peer
                             delay(250) // Update 4 times per second
                         }
                     } else {
@@ -262,16 +294,23 @@ fun MainScreen(
                             }
                             Button(
                                 onClick = {
-                                    if (isStreaming.value) {
-                                        stub.stopStreaming()
-                                        isStreaming.value = false
-                                    } else {
-                                        runBlocking {
-                                            stub.startStreaming(settings.getStreamingConfiguration())
-                                            isStreaming.value = true
+                                    coroutineScope.launch {
+                                        transitioning.value = true
+                                        try {
+                                            if (isStreaming.value) {
+                                                withContext(Dispatchers.IO) { stub.stopStreaming() }
+                                            } else {
+                                                val configuration = settings.getStreamingConfiguration()
+                                                withContext(Dispatchers.IO) { stub.startStreaming(configuration) }
+                                            }
+                                            // startStreaming can bail out on failure, so ask the service.
+                                            isStreaming.value = withContext(Dispatchers.IO) { stub.isStreaming }
+                                        } finally {
+                                            transitioning.value = false
                                         }
                                     }
                                 },
+                                enabled = !transitioning.value,
                                 modifier = Modifier.size(64.dp),
                                 shape = if (isStreaming.value) {
                                     RoundedCornerShape(2.dp)
