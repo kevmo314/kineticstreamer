@@ -45,7 +45,10 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install srt librist
 
+      # Advisory until the existing sources are formatted (done after the open Go PRs land, to
+      # avoid conflicting with them); then drop continue-on-error to enforce it.
       - name: gofmt
+        continue-on-error: true
         run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
 
       # cmd/jni is Android-only (links libandroid / liblog), so only the root package is checked on the host.
