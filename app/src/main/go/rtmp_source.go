@@ -141,6 +141,10 @@ func (s *RTMPServer) Stop() {
 	}
 	s.stopped = true
 	close(s.done)
+	select {
+	case <-s.sourceChan:
+	default:
+	}
 	if s.server != nil {
 		s.server.Close()
 		s.server = nil
@@ -192,7 +196,11 @@ func (s *RTMPServer) setSource(source *RTMPSource) {
 	}
 	s.source = source
 
-	// Non-blocking send to channel
+	// Replace any unclaimed (now stale) source, then non-blocking send
+	select {
+	case <-s.sourceChan:
+	default:
+	}
 	select {
 	case s.sourceChan <- source:
 	default:
@@ -367,37 +375,41 @@ func (h *rtmpHandler) parseAVCConfig(data []byte) {
 	// configurationVersion, profile, compatibility, level (4 bytes), then
 	// lengthSizeMinusOne (low 2 bits), numOfSPS (low 5 bits), SPS entries,
 	// numOfPPS, PPS entries. Entries are 2-byte length + data.
-	src := h.source
-	src.lengthSize = int(data[4]&0x03) + 1
-
+	// A truncated record is ignored entirely.
 	offset := 5
-	readSets := func(n int) [][]byte {
+	readSets := func(n int) ([][]byte, bool) {
 		var sets [][]byte
 		for i := 0; i < n; i++ {
 			if offset+2 > len(data) {
-				break
+				return nil, false
 			}
 			l := int(binary.BigEndian.Uint16(data[offset:]))
 			offset += 2
 			if offset+l > len(data) {
-				break
+				return nil, false
 			}
 			sets = append(sets, append([]byte(nil), data[offset:offset+l]...))
 			offset += l
 		}
-		return sets
+		return sets, true
 	}
 
 	numSPS := int(data[offset] & 0x1F)
 	offset++
-	src.sps = readSets(numSPS)
-	if offset >= len(data) {
-		src.pps = nil
+	sps, ok := readSets(numSPS)
+	if !ok || offset >= len(data) {
 		return
 	}
 	numPPS := int(data[offset])
 	offset++
-	src.pps = readSets(numPPS)
+	pps, ok := readSets(numPPS)
+	if !ok {
+		return
+	}
+
+	src := h.source
+	src.lengthSize = int(data[4]&0x03) + 1
+	src.sps, src.pps = sps, pps
 }
 
 // avccToAnnexB converts AVCC format NALUs to Annex B format
@@ -431,6 +443,7 @@ func (h *rtmpHandler) avccToAnnexB(avcc []byte, isKeyframe bool) []byte {
 	if n < 1 || n > 4 {
 		n = 4
 	}
+	paramsLen := len(buf)
 	offset := 0
 	for offset+n <= len(avcc) {
 		naluLen := 0
@@ -441,10 +454,16 @@ func (h *rtmpHandler) avccToAnnexB(avcc []byte, isKeyframe bool) []byte {
 		if naluLen > len(avcc)-offset {
 			break
 		}
-		buf = append(append(buf, startCode...), avcc[offset:offset+naluLen]...)
+		if naluLen > 0 {
+			buf = append(append(buf, startCode...), avcc[offset:offset+naluLen]...)
+		}
 		offset += naluLen
 	}
 
+	// Parameter sets alone are not a frame.
+	if len(buf) == paramsLen {
+		return nil
+	}
 	return buf
 }
 

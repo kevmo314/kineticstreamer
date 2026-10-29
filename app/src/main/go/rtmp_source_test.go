@@ -466,8 +466,44 @@ func TestAVCCTruncatedNAL(t *testing.T) {
 	h, src := newTestHandler()
 	h.OnVideo(0, flvVideo(false, 1, 0, []byte{0, 0, 0, 9, 1, 2})) // claims 9 bytes, has 2
 	h.OnVideo(0, flvVideo(false, 1, 0, nil))
+	// A keyframe with cached parameter sets but no usable NAL is not a frame.
+	h.OnVideo(0, flvVideo(true, 0, 0, avcConfig(4, [][]byte{{0x67}}, [][]byte{{0x68}})))
+	h.OnVideo(0, flvVideo(true, 1, 0, []byte{0, 0, 0, 9, 1, 2}))
+	h.OnVideo(0, flvVideo(true, 1, 0, []byte{0, 0, 0, 0}))
 	if len(src.videoQueue) != 0 {
 		t.Errorf("expected no frames, got %d", len(src.videoQueue))
+	}
+}
+
+// TestTruncatedAVCConfigIgnored: a truncated record must not clobber state.
+func TestTruncatedAVCConfigIgnored(t *testing.T) {
+	h, src := newTestHandler()
+	cfg := avcConfig(2, [][]byte{{0x67, 1, 2, 3}}, [][]byte{{0x68}})
+	h.parseAVCConfig(cfg[:9]) // cut inside the SPS
+	if len(src.sps) != 0 || len(src.pps) != 0 || src.lengthSize != 4 {
+		t.Errorf("truncated config applied: sps=%d pps=%d lengthSize=%d", len(src.sps), len(src.pps), src.lengthSize)
+	}
+	h.parseAVCConfig(cfg)
+	if len(src.sps) != 1 || len(src.pps) != 1 || src.lengthSize != 2 {
+		t.Errorf("full config: sps=%d pps=%d lengthSize=%d", len(src.sps), len(src.pps), src.lengthSize)
+	}
+}
+
+// TestWaitForSourceSkipsStaleSource: only the newest publisher is handed out,
+// and nothing is handed out after Stop.
+func TestWaitForSourceSkipsStaleSource(t *testing.T) {
+	server := NewRTMPServer(0)
+	s1, s2 := newRTMPSource(1, 1), newRTMPSource(1, 1)
+	server.setSource(s1)
+	server.setSource(s2)
+	if got := server.WaitForSource(time.Second); got != s2 {
+		t.Errorf("WaitForSource = %p, want newest %p", got, s2)
+	}
+
+	server.setSource(newRTMPSource(1, 1))
+	server.Stop()
+	if got := server.WaitForSource(time.Second); got != nil {
+		t.Error("WaitForSource should return nil after Stop")
 	}
 }
 
