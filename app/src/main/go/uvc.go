@@ -77,7 +77,13 @@ type UVCStream struct {
 
 // StartStreaming starts video streaming with the specified format
 func (s *UVCSource) StartStreaming(format, width, height, fps int) (*UVCStream, error) {
-	info, err := s.device.DeviceInfo()
+	s.mu.Lock()
+	device := s.device
+	s.mu.Unlock()
+	if device == nil {
+		return nil, fmt.Errorf("UVC source closed")
+	}
+	info, err := device.DeviceInfo()
 	if err != nil {
 		return nil, fmt.Errorf("UVC DeviceInfo failed: %v", err)
 	}
@@ -113,6 +119,11 @@ func (s *UVCSource) StartStreaming(format, width, height, fps int) (*UVCStream, 
 
 				stream := &UVCStream{reader: reader}
 				s.mu.Lock()
+				if s.device == nil { // closed while claiming the reader
+					s.mu.Unlock()
+					stream.Close()
+					return nil, fmt.Errorf("UVC source closed")
+				}
 				s.activeStream = stream
 				s.mu.Unlock()
 				return stream, nil

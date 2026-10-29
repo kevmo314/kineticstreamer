@@ -34,18 +34,33 @@ var (
 // reference is released under the same lock that guards calls into Java, so a
 // concurrent close can never delete it while a callback is in flight.
 type pliHook struct {
-	mu  sync.Mutex
-	ref C.uintptr_t
+	mu     sync.Mutex
+	ref    C.uintptr_t
+	closed bool
 }
 
 // set replaces the callback reference (0 clears it), releasing the old one.
+// After close, new references are released immediately instead of stored.
 func (p *pliHook) set(ref C.uintptr_t) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.ref != 0 {
 		C.kinetic_pli_release(p.ref)
+		p.ref = 0
+	}
+	if p.closed && ref != 0 {
+		C.kinetic_pli_release(ref)
+		return
 	}
 	p.ref = ref
+}
+
+// close releases the reference and rejects future ones.
+func (p *pliHook) close() {
+	p.mu.Lock()
+	p.closed = true
+	p.mu.Unlock()
+	p.set(0)
 }
 
 func (p *pliHook) fire() {
@@ -82,9 +97,6 @@ func recoverLog(name string) {
 		log.Printf("PANIC in %s: %v\nStack trace:\n%s", name, r, debug.Stack())
 	}
 }
-
-//export GoInit
-func GoInit() {}
 
 //export GoCreateSRTSink
 func GoCreateSRTSink(urlStr *C.char, mimeTypesStr *C.char) (handle int64) {
@@ -125,8 +137,8 @@ func GoSRTSinkClose(handle int64) {
 	if !ok {
 		return
 	}
+	e.pli.close()
 	e.sink.Close()
-	e.pli.set(0)
 }
 
 //export GoSRTSinkGetBandwidth
@@ -364,8 +376,8 @@ func GoWHIPSinkClose(handle int64) {
 	if !ok {
 		return
 	}
+	e.pli.close()
 	e.sink.Close()
-	e.pli.set(0)
 }
 
 //export GoWHIPSinkGetICEConnectionState

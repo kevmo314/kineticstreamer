@@ -82,7 +82,6 @@ Java_com_kevmo314_kineticstreamer_kinetic_Kinetic_init(JNIEnv* env, jclass clazz
     if (cls != NULL) {
         g_onPLI = (*env)->GetMethodID(env, cls, "onPLI", "()V");
     }
-    GoInit();
 }
 
 JNIEXPORT jlong JNICALL

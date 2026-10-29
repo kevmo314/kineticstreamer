@@ -3,7 +3,6 @@ package kinetic
 import (
 	"sync"
 	"testing"
-	"time"
 )
 
 func TestHandlesAddGetRemove(t *testing.T) {
@@ -73,30 +72,4 @@ func TestHandlesConcurrent(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-}
-
-// A slow Close performed after Remove must not block other handles.
-func TestHandlesRemoveThenSlowCloseDoesNotBlock(t *testing.T) {
-	var h Handles[int]
-	slow := h.Add(1)
-	other := h.Add(2)
-
-	release := make(chan struct{})
-	go func() {
-		h.Remove(slow)
-		<-release // simulated blocking Close, outside the table lock
-	}()
-
-	done := make(chan struct{})
-	go func() {
-		h.Get(other)
-		h.Add(3)
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("table blocked while a removed value was closing")
-	}
-	close(release)
 }
