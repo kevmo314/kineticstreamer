@@ -42,11 +42,14 @@ func main() {
 	seg := flag.Duration("seg", 12*time.Second, "how long to record the first connection before cutting it")
 	gap := flag.Duration("gap", 4*time.Second, "how long the listener stays down between connections")
 	maxRecovery := flag.Duration("max-recovery", 10*time.Second, "reconnect must deliver data within this long of the listener coming back")
+	minFPS := flag.Float64("min-fps", 27, "lowest accepted video frame rate (the app encodes 30 fps)")
 	analyzeOnly := flag.String("analyze", "", "analyze this recording, print the report and exit")
 	flag.Parse()
 
 	if *analyzeOnly != "" {
-		rep, err := e2e.Analyze(*analyzeOnly, e2e.DefaultExpectations())
+		exp := e2e.DefaultExpectations()
+		exp.MinFPS = *minFPS
+		rep, err := e2e.Analyze(*analyzeOnly, exp)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -62,7 +65,7 @@ func main() {
 
 	done := make(chan *result, 1)
 	go func() {
-		done <- record(paths, *port, *seg, *gap, *maxRecovery)
+		done <- record(paths, *port, *seg, *gap, *maxRecovery, *minFPS)
 	}()
 
 	mux := http.NewServeMux()
@@ -87,7 +90,7 @@ func main() {
 	}
 }
 
-func record(paths []string, port int, seg, gap, maxRecovery time.Duration) *result {
+func record(paths []string, port int, seg, gap, maxRecovery time.Duration, minFPS float64) *result {
 	res := &result{}
 	fail := func(format string, a ...any) { res.Failures = append(res.Failures, fmt.Sprintf(format, a...)) }
 
@@ -102,6 +105,7 @@ func record(paths []string, port int, seg, gap, maxRecovery time.Duration) *resu
 			continue
 		}
 		exp := e2e.DefaultExpectations()
+		exp.MinFPS = minFPS
 		if i == 0 {
 			exp.MinDuration = seg.Seconds() - 3 // the cut and the sender's buffering eat into it
 		}

@@ -496,7 +496,9 @@ func (s *SRTSink) reconnect() error {
 			continue
 		}
 		s.fd = sck.fd
+		paramSets := s.mux.paramSets // the encoder won't send its config again
 		s.mux = newTSMux(sck, sck.payloadSize, s.tracks)
+		s.mux.paramSets = paramSets
 		s.lastPktSndLossTotal = 0 // stats are per socket
 		s.reconnecting = false
 		pli := s.pliCallback

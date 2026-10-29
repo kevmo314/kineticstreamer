@@ -22,25 +22,25 @@ import (
 
 // Expectations are the thresholds a recording is checked against.
 type Expectations struct {
-	Width, Height int
-	FPS           float64 // expected frame rate, +- FPSTolerance
-	FPSTolerance  float64
-	SampleRate    int
-	Channels      int
-	MinDuration   float64 // seconds
-	MaxPTSGap     float64 // largest allowed gap between consecutive frames, seconds
-	MaxKeyGap     float64 // largest allowed gap between keyframes, seconds
-	MaxSyncMeanMs float64 // |mean(audio - video)| over flash/tone pairs
-	MaxDriftMs    float64 // offset change over the run
-	MinPairs      int     // minimum number of paired flash/tone events
+	Width, Height  int
+	MinFPS, MaxFPS float64 // accepted frame rate
+	SampleRate     int
+	Channels       int
+	MinDuration    float64 // seconds
+	MaxPTSGap      float64 // largest allowed gap between consecutive frames, seconds
+	MaxKeyFrames   int     // largest allowed number of frames between keyframes
+	MaxSyncMeanMs  float64 // |mean(audio - video)| over flash/tone pairs
+	MaxDriftMs     float64 // offset change over the run
+	MinPairs       int     // minimum number of paired flash/tone events
 }
 
 // DefaultExpectations matches the app's fixed 1080p30 H.264 + 48 kHz stereo AAC output.
 func DefaultExpectations() Expectations {
 	return Expectations{
-		Width: 1920, Height: 1080, FPS: 30, FPSTolerance: 3,
+		Width: 1920, Height: 1080, MinFPS: 27, MaxFPS: 33,
 		SampleRate: 48000, Channels: 2,
-		MinDuration: 8, MaxPTSGap: 0.5, MaxKeyGap: 6.5,
+		MinDuration: 8, MaxPTSGap: 0.5, MaxKeyFrames: 180, // the app asks for a keyframe every 150 frames
+
 		MaxSyncMeanMs: 40, MaxDriftMs: 20, MinPairs: 10,
 	}
 }
@@ -56,7 +56,7 @@ type Report struct {
 	DurationSec    float64 `json:"duration_sec"`
 	Keyframes      int     `json:"keyframes"`
 	MaxVideoGapSec float64 `json:"max_video_gap_sec"`
-	MaxKeyGapSec   float64 `json:"max_key_gap_sec"`
+	MaxKeyFrames   int     `json:"max_frames_between_keyframes"`
 	FirstKeyframe  bool    `json:"first_frame_keyframe"`
 	FirstHasSPSPPS bool    `json:"first_keyframe_has_sps_pps"`
 
@@ -137,7 +137,8 @@ func checkStructure(path string, exp Expectations, r *Report) error {
 	var (
 		sawSPS, sawPPS, haveSPS, sawSlice bool
 		sps                               h264.SPS
-		lastV, firstV, lastKey            float64
+		lastV, firstV                     float64
+		lastKeyFrame                      int
 		lastA                             float64
 		haveA, haveKey                    bool
 		videoMono, audioMono              = true, true
@@ -182,10 +183,10 @@ func checkStructure(path string, exp Expectations, r *Report) error {
 		r.VideoFrames++
 		if idr {
 			r.Keyframes++
-			if haveKey {
-				r.MaxKeyGapSec = math.Max(r.MaxKeyGapSec, t-lastKey)
+			if n := r.VideoFrames - 1 - lastKeyFrame; haveKey && n > r.MaxKeyFrames {
+				r.MaxKeyFrames = n
 			}
-			lastKey, haveKey = t, true
+			lastKeyFrame, haveKey = r.VideoFrames-1, true
 		}
 		return nil
 	})
@@ -235,8 +236,8 @@ func checkStructure(path string, exp Expectations, r *Report) error {
 	if r.Width != exp.Width || r.Height != exp.Height {
 		r.fail("resolution %dx%d, want %dx%d", r.Width, r.Height, exp.Width, exp.Height)
 	}
-	if math.Abs(r.FPS-exp.FPS) > exp.FPSTolerance {
-		r.fail("fps %.2f, want %.0f +- %.0f", r.FPS, exp.FPS, exp.FPSTolerance)
+	if r.FPS < exp.MinFPS || r.FPS > exp.MaxFPS {
+		r.fail("fps %.2f, want %.0f to %.0f", r.FPS, exp.MinFPS, exp.MaxFPS)
 	}
 	if r.DurationSec < exp.MinDuration {
 		r.fail("duration %.1fs, want at least %.1fs", r.DurationSec, exp.MinDuration)
@@ -244,8 +245,8 @@ func checkStructure(path string, exp Expectations, r *Report) error {
 	if r.MaxVideoGapSec > exp.MaxPTSGap {
 		r.fail("video PTS gap %.3fs exceeds %.3fs", r.MaxVideoGapSec, exp.MaxPTSGap)
 	}
-	if r.Keyframes > 1 && r.MaxKeyGapSec > exp.MaxKeyGap {
-		r.fail("keyframe gap %.2fs exceeds %.2fs", r.MaxKeyGapSec, exp.MaxKeyGap)
+	if r.MaxKeyFrames > exp.MaxKeyFrames {
+		r.fail("%d frames between keyframes, want at most %d", r.MaxKeyFrames, exp.MaxKeyFrames)
 	}
 	if r.AudioPackets == 0 {
 		r.fail("no audio packets")
@@ -268,7 +269,7 @@ func checkSync(path string, exp Expectations, r *Report) error {
 		return fmt.Errorf("decode video: %w", err)
 	}
 	aud, err := ffmpegMetadata(path, "-map", "0:a:0", "-af",
-		"asetnsamples=n=240:p=0,astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-")
+		"asetnsamples=n=48:p=0,astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-")
 	if err != nil {
 		return fmt.Errorf("decode audio: %w", err)
 	}
