@@ -249,3 +249,15 @@ func TestBinaryDumpOnlyVideoKeyframesSplit(t *testing.T) {
 		t.Fatalf("got %d samples, want 5", len(got))
 	}
 }
+
+// Without a video track, audio keyframes are the only thing to split on.
+func TestBinaryDumpAudioOnlySplitsOnKeyframes(t *testing.T) {
+	sink := NewBinaryDumpSink(t.TempDir(), "audio/opus")
+	sink.WriteSample(0, []byte("a0"), 100, keyFrame)
+	sink.WriteSample(0, []byte("a1"), 200, keyFrame)
+	sink.Close()
+	manifest, err := sink.ReadManifest()
+	if err != nil || len(manifest) != 2 {
+		t.Fatalf("manifest %+v, err %v, want 2 files", manifest, err)
+	}
+}

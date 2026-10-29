@@ -84,11 +84,17 @@ type BinaryDumpSink struct {
 
 // NewBinaryDumpSink records into directory. encodedMediaFormatMimeTypes lists the
 // tracks (";"-separated, as for the other sinks); audio encoders flag every
-// sample as a keyframe, so only the video tracks may split files.
+// sample as a keyframe, so when there is video only its keyframes split files.
 func NewBinaryDumpSink(directory, encodedMediaFormatMimeTypes string) *BinaryDumpSink {
 	var video []bool
 	for _, m := range strings.Split(encodedMediaFormatMimeTypes, ";") {
 		video = append(video, strings.HasPrefix(m, "video/"))
+	}
+	if !slices.Contains(video, true) {
+		// Audio-only: there is nothing else to split on.
+		for i := range video {
+			video[i] = true
+		}
 	}
 	return &BinaryDumpSink{directory: directory, video: video}
 }
