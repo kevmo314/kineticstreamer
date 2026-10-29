@@ -283,3 +283,46 @@ func TestSRTSink_ConcurrentWritersReconnect(t *testing.T) {
 		}
 	}
 }
+
+// Closing while a writer owns the reconnect loop must interrupt it and still
+// release the library reference exactly once.
+func TestSRTSink_CloseDuringReconnect(t *testing.T) {
+	before := srtRefCount()
+	l, err := newSRTTestListener()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cch := make(chan *srtTestConn, 1)
+	go func() { c, _ := l.Accept(); cch <- c }()
+	sink, err := NewSRTSink(fmt.Sprintf("srt://127.0.0.1:%d?conntimeo=500", l.Port()), string(MediaFormatMimeTypeVideoH264))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := <-cch
+	c.Close()
+	l.Close()
+	time.Sleep(300 * time.Millisecond)
+
+	done := make(chan error, 1)
+	go func() {
+		var err error
+		for i := 0; err == nil && i < 500; i++ {
+			err = sink.WriteSample(0, testAnnexB, int64(i)*33_000, int32(MediaCodecBufferFlagKeyFrame))
+			time.Sleep(10 * time.Millisecond)
+		}
+		done <- err
+	}()
+	time.Sleep(800 * time.Millisecond) // writer is now in the reconnect loop
+	sink.Close()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected writer to fail after Close")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("reconnect loop did not stop on Close")
+	}
+	if n := srtRefCount(); n != before {
+		t.Fatalf("refcount %d, want %d", n, before)
+	}
+}

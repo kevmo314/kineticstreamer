@@ -468,6 +468,7 @@ func (s *SRTSink) reconnect() error {
 		select {
 		case <-time.After(delay):
 		case <-s.done:
+			srtRelease() // Close left the reference to us
 			return fmt.Errorf("SRT: sink closed during reconnect")
 		}
 
@@ -479,6 +480,7 @@ func (s *SRTSink) reconnect() error {
 			if err == nil {
 				C.srt_close(sck.fd)
 			}
+			srtRelease() // Close left the reference to us
 			return fmt.Errorf("SRT: sink closed during reconnect")
 		}
 		if err != nil {
@@ -541,12 +543,17 @@ func (s *SRTSink) Close() error {
 	}
 	s.closed = true
 	close(s.done)
+	// An in-flight reconnect still uses libsrt; it releases our reference
+	// when it notices the sink is closed.
+	release := !s.reconnecting
 	if s.fd != srtInvalidSock {
 		C.srt_close(s.fd)
 		s.fd = srtInvalidSock
 	}
 	s.Unlock()
-	srtRelease()
+	if release {
+		srtRelease()
+	}
 	return nil
 }
 
