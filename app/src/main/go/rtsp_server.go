@@ -131,7 +131,6 @@ func (sh *RTSPServerSink) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.R
 			StatusCode: base.StatusOK,
 		}, nil
 	}
-	requestId := sh.recordedPlaybackRequestId.Add(1)
 	sh.mu.Lock()
 	requestedPTS := sh.pts0 + dpts
 	sh.mu.Unlock()
@@ -140,13 +139,17 @@ func (sh *RTSPServerSink) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.R
 	if err != nil {
 		return &base.Response{StatusCode: base.StatusInternalServerError}, err
 	}
+	requestId := sh.recordedPlaybackRequestId.Add(1)
 	sh.wg.Add(1)
 	go func() {
 		defer sh.wg.Done()
 		defer sr.Close()
+		// resume live streaming once the recording has been played out.
+		defer sh.recordedPlaybackRequestId.CompareAndSwap(requestId, 0)
 		start := time.Now()
 		var first int64
-		for i := 0; sh.recordedPlaybackRequestId.Load() == requestId; i++ {
+		havePTS0 := false
+		for sh.recordedPlaybackRequestId.Load() == requestId {
 			sample, err := sr.Next()
 			if err != nil {
 				return
@@ -155,8 +158,8 @@ func (sh *RTSPServerSink) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.R
 				continue
 			}
 			// pace the samples at the rate they were recorded.
-			if i == 0 {
-				first = sample.PTS
+			if !havePTS0 {
+				first, havePTS0 = sample.PTS, true
 			}
 			if wait := time.Duration(sample.PTS-first)*time.Microsecond - time.Since(start); wait > 0 {
 				timer := time.NewTimer(wait)

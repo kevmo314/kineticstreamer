@@ -1,7 +1,6 @@
 package kinetic
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -220,14 +219,15 @@ func (s *WHEPSink) WriteSample(i int, buf []byte, ptsMicroseconds int64) (bool, 
 }
 
 func (s *WHEPSink) Close() error {
-	err := s.server.Shutdown(context.Background())
-	// Serve may not have started yet, in which case nothing else would close the listener.
-	s.listener.Close()
+	// refuse new sessions first, then close the server, which also cancels in-flight offers.
 	s.sessionsMu.Lock()
 	s.closed = true
 	sessions := s.sessions
 	s.sessions = map[string]*webrtc.PeerConnection{}
 	s.sessionsMu.Unlock()
+	err := s.server.Close()
+	// Serve may not have started yet, in which case nothing else would close the listener.
+	s.listener.Close()
 	for _, pc := range sessions {
 		pc.Close()
 	}

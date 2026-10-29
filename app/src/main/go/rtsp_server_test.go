@@ -148,6 +148,15 @@ func TestRTSPServerRecordedPlayback(t *testing.T) {
 		t.Errorf("timestamp delta %d, want %d", d, 48000/20)
 	}
 
+	// once the recording is played out, live streaming resumes.
+	deadline := time.Now().Add(2 * time.Second)
+	for s.recordedPlaybackRequestId.Load() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("live streaming did not resume after playback ended")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
 	// Close must stop playback and release the ports.
 	closed := make(chan struct{})
 	go func() {
