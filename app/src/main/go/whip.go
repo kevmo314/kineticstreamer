@@ -420,7 +420,7 @@ func (s *WHIPSink) install(c *whipConn) {
 // reconnect replaces the lost connection old, retrying with exponential
 // backoff until it succeeds or the sink is closed.
 func (s *WHIPSink) reconnect(old *whipConn) {
-	old.shutdown()
+	go old.shutdown() // DELETE may be slow; don't delay the retry
 
 	backoff := 100 * time.Millisecond
 	for {
@@ -442,10 +442,11 @@ func (s *WHIPSink) reconnect(old *whipConn) {
 	}
 }
 
-// shutdown DELETEs the WHIP resource and closes the peer connection. Safe to
+// shutdown closes the peer connection and DELETEs the WHIP resource. Safe to
 // call more than once.
 func (c *whipConn) shutdown() {
 	c.shutOnce.Do(func() {
+		c.pc.Close()
 		if c.resourceURL != "" {
 			req, err := http.NewRequest(http.MethodDelete, c.resourceURL, nil)
 			if err != nil {
@@ -463,7 +464,6 @@ func (c *whipConn) shutdown() {
 				}
 			}
 		}
-		c.pc.Close()
 	})
 }
 
