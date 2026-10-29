@@ -7,7 +7,6 @@ import java.io.Closeable
  */
 class SRTSink(url: String, mimeTypes: String) : Closeable {
     private var nativeHandle: Long
-    private var pliCallback: PLICallback? = null
 
     init {
         // Ensure Kinetic library is loaded
@@ -21,9 +20,7 @@ class SRTSink(url: String, mimeTypes: String) : Closeable {
 
     private external fun create(url: String, mimeTypes: String): Long
 
-    private external fun writeH264(handle: Long, data: ByteArray, pts: Long)
-    private external fun writeH265(handle: Long, data: ByteArray, pts: Long)
-    private external fun writeOpus(handle: Long, data: ByteArray, pts: Long)
+    private external fun writeSample(handle: Long, streamIndex: Int, data: ByteArray, pts: Long, flags: Int)
     private external fun getBandwidth(handle: Long): Long
     private external fun setPLICallback(handle: Long, callback: PLICallback)
 
@@ -35,11 +32,8 @@ class SRTSink(url: String, mimeTypes: String) : Closeable {
      * @param flags MediaCodec flags
      */
     fun writeSample(streamIndex: Int, data: ByteArray, ptsMicroseconds: Long, flags: Int) {
-        when (streamIndex) {
-            0 -> writeH264(nativeHandle, data, ptsMicroseconds) // Video stream
-            1 -> writeOpus(nativeHandle, data, ptsMicroseconds) // Audio stream
-            else -> throw IllegalArgumentException("Invalid stream index: $streamIndex")
-        }
+        require(streamIndex == 0 || streamIndex == 1) { "Invalid stream index: $streamIndex" }
+        writeSample(nativeHandle, streamIndex, data, ptsMicroseconds, flags)
     }
 
     /**
@@ -53,7 +47,6 @@ class SRTSink(url: String, mimeTypes: String) : Closeable {
      * Set callback for keyframe requests (PLI - Picture Loss Indication)
      */
     fun setPLICallback(callback: PLICallback) {
-        this.pliCallback = callback
         setPLICallback(nativeHandle, callback)
     }
 
