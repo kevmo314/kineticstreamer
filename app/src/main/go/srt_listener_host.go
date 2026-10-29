@@ -13,13 +13,14 @@ package kinetic
 #include <netinet/in.h>
 #include <srt/srt.h>
 
+// *out_port is the port to bind on entry (0 = any) and the bound port on exit.
 static int srt_test_listen(int* out_port) {
     SRTSOCKET sock = srt_create_socket();
     if (sock == SRT_INVALID_SOCK) return -1;
 
     struct sockaddr_in sa = {0};
     sa.sin_family = AF_INET;
-    sa.sin_port = 0;
+    sa.sin_port = htons(*out_port);
     sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     if (srt_bind(sock, (struct sockaddr*)&sa, sizeof(sa)) == SRT_ERROR) {
         srt_close(sock);
@@ -62,9 +63,12 @@ type srtTestListener struct {
 	port int
 }
 
-func newSRTTestListener() (*srtTestListener, error) {
+func newSRTTestListener() (*srtTestListener, error) { return newSRTTestListenerOn(0) }
+
+// newSRTTestListenerOn binds a specific loopback port (0 = any).
+func newSRTTestListenerOn(port int) (*srtTestListener, error) {
 	C.srt_startup()
-	var cport C.int
+	cport := C.int(port)
 	sock := C.srt_test_listen(&cport)
 	if sock == -1 {
 		err := srtGetAndClearError()
@@ -101,3 +105,35 @@ func (l *srtTestListener) AcceptAndDrain(max int) ([]byte, error) {
 
 // Port is the loopback port the listener is bound to.
 func (l *srtTestListener) Port() int { return l.port }
+
+// srtTestConn is an accepted peer connection.
+type srtTestConn struct{ sock C.int }
+
+// Accept blocks for one peer. It fails once the listener is closed.
+func (l *srtTestListener) Accept() (*srtTestConn, error) {
+	c := C.srt_test_accept(l.sock)
+	if c == -1 {
+		return nil, fmt.Errorf("srt_accept: %w", srtGetAndClearError())
+	}
+	return &srtTestConn{sock: c}, nil
+}
+
+// Close closes the listening socket (accepted conns are unaffected).
+func (l *srtTestListener) Close() {
+	C.srt_close(l.sock)
+}
+
+// Drain reads until the peer goes away or the conn is closed.
+func (c *srtTestConn) Drain() []byte {
+	var chunk [1500]byte
+	var out []byte
+	for {
+		n := C.srt_test_recv(c.sock, (*C.char)(unsafe.Pointer(&chunk[0])), C.int(len(chunk)))
+		if n <= 0 {
+			return out
+		}
+		out = append(out, chunk[:int(n)]...)
+	}
+}
+
+func (c *srtTestConn) Close() { C.srt_close(c.sock) }

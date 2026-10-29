@@ -1,0 +1,37 @@
+name: Set up native Android build
+description: JDK 17, Go, Android SDK/NDK and build tools on an Ubuntu runner, with the third-party C dep cache.
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-java@v5.2.0
+      with:
+        distribution: temurin
+        java-version: '17'
+        cache: gradle
+
+    - uses: actions/setup-go@v6.4.0
+      with:
+        go-version: '1.25'
+        cache: true
+        cache-dependency-path: app/src/main/go/go.sum
+
+    - uses: android-actions/setup-android@v4.0.1
+      with:
+        packages: platform-tools
+
+    - id: ndk
+      uses: nttld/setup-ndk@v1.6.0
+      with:
+        ndk-version: r27c
+
+    - shell: bash
+      run: |
+        sudo apt-get update && sudo apt-get install -y cmake ninja-build meson
+        echo "ANDROID_NDK=${{ steps.ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+        echo "ANDROID_NDK_HOME=${{ steps.ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+
+    - uses: actions/cache@v5.0.5
+      with:
+        path: app/src/main/go/third_party/output
+        key: third-party-ubuntu-latest-ndk-r27c-${{ hashFiles('app/build.gradle.kts', 'app/src/main/go/third_party/CMakeLists.txt', 'app/src/main/go/build.sh', 'app/src/main/go/build.ps1') }}
