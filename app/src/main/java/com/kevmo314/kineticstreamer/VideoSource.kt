@@ -229,7 +229,8 @@ private fun openUsbCamera(context: Context, device: UsbDevice, outputSurface: Su
             }
         }
 
-        val stream = UVCSource(conn.fileDescriptor).startStreaming(8, 1920, 1080, 30)
+        val uvcSource = UVCSource(conn.fileDescriptor)
+        val stream = uvcSource.startStreaming(8, 1920, 1080, 30)
         val pipeline = H264DecoderPipeline(
             "UvcDecoder", outputSurface, renderer,
             // Arrival time is CLOCK_MONOTONIC, the clock AudioRecord timestamps use
@@ -237,7 +238,13 @@ private fun openUsbCamera(context: Context, device: UsbDevice, outputSurface: Su
             { stream.close() },
         )
         return Closeable {
-            pipeline.close()
+            pipeline.close() // closes the stream
+            try {
+                uvcSource.close() // releases the USB device claim
+            } catch (e: UnsatisfiedLinkError) {
+                // native UVCSource.close is only available once #19 lands
+                Log.w("VideoSource", "UVCSource.close not available: ${e.message}")
+            }
             conn.close()
         }
     } catch (e: Throwable) {
