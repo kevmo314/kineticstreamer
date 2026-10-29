@@ -167,6 +167,9 @@ func (sh *RTSPServerSink) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.R
 				case <-timer.C:
 				}
 			}
+			if sh.recordedPlaybackRequestId.Load() != requestId {
+				return
+			}
 			if err := sh.writePacket(sample.Track, sample.Data, sample.PTS); err != nil {
 				return
 			}
