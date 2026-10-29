@@ -12,6 +12,7 @@ import (
 func TestWebRTCLoopbackDataChannel(t *testing.T) {
 	se := webrtc.SettingEngine{}
 	se.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
+	se.SetIncludeLoopbackCandidate(true)
 	api := webrtc.NewAPI(webrtc.WithSettingEngine(se))
 
 	offerer, err := api.NewPeerConnection(webrtc.Configuration{})
@@ -34,7 +35,8 @@ func TestWebRTCLoopbackDataChannel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dc.OnOpen(func() { _ = dc.SendText("hello") })
+	sendErr := make(chan error, 1)
+	dc.OnOpen(func() { sendErr <- dc.SendText("hello") })
 
 	offer, err := offerer.CreateOffer(nil)
 	if err != nil {
@@ -59,6 +61,15 @@ func TestWebRTCLoopbackDataChannel(t *testing.T) {
 	<-answerDone
 	if err := offerer.SetRemoteDescription(*answerer.LocalDescription()); err != nil {
 		t.Fatal(err)
+	}
+
+	select {
+	case err := <-sendErr:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("timed out waiting for data channel to open")
 	}
 
 	select {
