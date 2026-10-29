@@ -119,7 +119,7 @@ func NewWHIPSink(url, bearerToken, encodedMediaFormatMimeTypes string, opts ...W
 	if err != nil {
 		return nil, err
 	}
-	s.conn.Store(c)
+	s.install(c)
 
 	return s, nil
 }
@@ -391,11 +391,30 @@ func (s *WHIPSink) lost(c *whipConn) {
 	}
 	select {
 	case <-s.done:
+		c.shutdown() // Close may have missed c, having already swapped it out
 		return
 	default:
 	}
 	log.Printf("WHIP connection lost, initiating reconnection...")
 	go s.reconnect(c)
+}
+
+// install publishes a freshly connected c, covering the two events that could
+// have been missed before it was visible: Close, and an ICE drop.
+func (s *WHIPSink) install(c *whipConn) {
+	s.conn.Store(c)
+	select {
+	case <-s.done:
+		if c := s.conn.Swap(nil); c != nil {
+			c.shutdown()
+		}
+		return
+	default:
+	}
+	switch c.pc.ICEConnectionState() {
+	case webrtc.ICEConnectionStateDisconnected, webrtc.ICEConnectionStateFailed, webrtc.ICEConnectionStateClosed:
+		s.lost(c)
+	}
 }
 
 // reconnect replaces the lost connection old, retrying with exponential
@@ -407,13 +426,8 @@ func (s *WHIPSink) reconnect(old *whipConn) {
 	for {
 		c, err := s.connect()
 		if err == nil {
-			s.conn.Store(c)
-			select {
-			case <-s.done: // Close raced with us and may have missed c
-				s.conn.Swap(nil).shutdown()
-			default:
-				log.Printf("WHIP reconnection successful")
-			}
+			s.install(c)
+			log.Printf("WHIP reconnection successful")
 			return
 		}
 		log.Printf("Reconnection attempt failed: %v, retrying in %v", err, backoff)

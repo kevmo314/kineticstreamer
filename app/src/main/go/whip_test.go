@@ -302,6 +302,29 @@ func TestWHIPSink_CloseConcurrentWithWrites(t *testing.T) {
 	}
 }
 
+func TestWHIPSink_Reconnects(t *testing.T) {
+	srv := newWHIPTestServer(t, whipOK)
+	sink, err := NewWHIPSink(srv.URL+"/whip", "", whipTestMimeTypes)
+	if err != nil {
+		t.Fatalf("NewWHIPSink: %v", err)
+	}
+	defer sink.Close()
+
+	// Kill the server side; the sink must notice, DELETE the old resource and re-POST.
+	srv.pcs.Range(func(k, _ any) bool { k.(*webrtc.PeerConnection).Close(); return true })
+
+	deadline := time.Now().Add(30 * time.Second)
+	for srv.posts.Load() < 2 || srv.deletes.Load() < 1 || sink.GetICEConnectionState() != "connected" {
+		if time.Now().After(deadline) {
+			t.Fatalf("did not reconnect: posts=%d deletes=%d state=%s", srv.posts.Load(), srv.deletes.Load(), sink.GetICEConnectionState())
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if _, err := sink.WriteH264(nal(0x65, 100), 0); err != nil {
+		t.Errorf("WriteH264 after reconnect: %v", err)
+	}
+}
+
 func TestSplitAnnexB(t *testing.T) {
 	buf := []byte{0, 0, 0, 1, 0x67, 1, 2, 0, 0, 1, 0x68, 3, 0, 0, 0, 1, 0x65, 4, 0}
 	got := splitAnnexB(buf)
