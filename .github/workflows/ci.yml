@@ -91,15 +91,38 @@ jobs:
       # Build first so the native compile doesn't compete with the booting emulator.
       - run: ./gradlew assembleDebug assembleDebugAndroidTest --stacktrace
 
+      # Host side of StreamingE2ETest: an SRT receiver that records the stream and checks it
+      # (ffmpeg decodes it for the A/V sync measurement). The emulator reaches it at 10.0.2.2.
+      - name: Start end-to-end receiver
+        working-directory: app/src/main/go
+        run: |
+          sudo apt-get install -y ffmpeg libsrt-openssl-dev librist-dev
+          go build -o "$RUNNER_TEMP/e2erecv" ./cmd/e2erecv
+          mkdir -p "$RUNNER_TEMP/e2e-out"
+          nohup "$RUNNER_TEMP/e2erecv" -out "$RUNNER_TEMP/e2e-out" > "$RUNNER_TEMP/e2erecv.log" 2>&1 &
+
       - uses: reactivecircus/android-emulator-runner@v2.38.0
         with:
           api-level: 34
           arch: x86_64
-          script: ./gradlew connectedDebugAndroidTest --stacktrace
+          disk-size: 8192M
+          ram-size: 4096M
+          script: ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.e2eRequired=true --stacktrace
+
+      # Per-test results, so a suite that silently runs nothing (or skips tests) is visible.
+      - name: Instrumented test summary
+        if: always()
+        run: |
+          python3 .github/scripts/junit_summary.py app/build/outputs/androidTest-results --min-tests 8 | tee -a "$GITHUB_STEP_SUMMARY"
+          { echo; echo '### End-to-end report'; echo '```json'; cat "$RUNNER_TEMP/e2e-out/report.json" 2>/dev/null || echo 'no report'; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload reports
         if: failure()
         uses: actions/upload-artifact@v7.0.1
         with:
           name: instrumented-reports
-          path: app/build/reports
+          path: |
+            app/build/reports
+            app/build/outputs/androidTest-results
+            ${{ runner.temp }}/e2e-out
+            ${{ runner.temp }}/e2erecv.log

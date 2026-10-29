@@ -12,6 +12,7 @@ import android.content.pm.PackageManager
 import android.hardware.camera2.CameraManager
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
+import android.graphics.SurfaceTexture
 import android.media.AudioFormat
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
@@ -46,6 +47,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.combine
@@ -72,7 +74,20 @@ class StreamingService : Service() {
         const val ACTION_SET_USB_DEVICE = "com.kevmo314.kineticstreamer.action.SET_USB_DEVICE"
         const val ACTION_USB_DEVICE_CHANGED = "com.kevmo314.kineticstreamer.action.USB_DEVICE_CHANGED"
         const val EXTRA_USB_DEVICE = "com.kevmo314.kineticstreamer.extra.USB_DEVICE"
+
+        /**
+         * Test hook: when set before the service is created, replaces camera and microphone
+         * capture (only that step; renderer, encoders and sinks run for real).
+         */
+        @Volatile
+        @androidx.annotation.VisibleForTesting
+        var captureOverride: CaptureOverride? = null
     }
+
+    class CaptureOverride(
+        val video: (SurfaceTextureRenderer) -> Flow<SurfaceTexture>,
+        val audio: () -> Flow<TimestampedAudio>,
+    )
 
     class UsbReceiver: BroadcastReceiver() {
         companion object {
@@ -960,6 +975,7 @@ class StreamingService : Service() {
         }
         .flowOn(Dispatchers.IO) // Process video on IO dispatcher (blocking on frame reads)
         .flatMapLatest { device ->
+            captureOverride?.let { return@flatMapLatest it.video(renderer!!) }
             Log.i("StreamingService", "flatMapLatest received device: $device")
             // if the device is UsbDevice, request permissions
             if (device is VideoSourceDevice.UsbCamera) {
@@ -1019,6 +1035,7 @@ class StreamingService : Service() {
             ) { deviceId, _ -> deviceId }
             .flowOn(Dispatchers.IO) // Process audio on IO dispatcher
             .flatMapLatest { deviceId ->
+                captureOverride?.let { return@flatMapLatest it.audio() }
                 // Check if current video source is RTMP
                 val videoDevice = currentVideoDevice.get()
                 if (videoDevice is VideoSourceDevice.RtmpServer) {
