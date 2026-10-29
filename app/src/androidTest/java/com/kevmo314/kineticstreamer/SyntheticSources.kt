@@ -3,6 +3,7 @@ package com.kevmo314.kineticstreamer
 import android.graphics.PixelFormat
 import android.graphics.SurfaceTexture
 import android.media.ImageWriter
+import android.util.Log
 import android.view.Surface
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -23,6 +24,7 @@ class SyntheticSources(private val epochNanos: Long = System.nanoTime()) {
     companion object {
         const val FLASH_PERIOD_MS = 500
         const val TONE_MS = 60
+        private const val TAG = "SyntheticSources"
         private const val FPS = 30
         private const val SAMPLE_RATE = 48000
         private const val CHUNK_MS = 10
@@ -60,6 +62,8 @@ class SyntheticSources(private val epochNanos: Long = System.nanoTime()) {
         val periodNanos = 1_000_000_000L / FPS
         val producer = thread(name = "SyntheticVideo") {
             var i = nextSlot(periodNanos)
+            var posted = 0
+            var skipped = 0L
             var white: ByteArray? = null
             var black: ByteArray? = null
             while (!Thread.currentThread().isInterrupted) {
@@ -76,12 +80,17 @@ class SyntheticSources(private val epochNanos: Long = System.nanoTime()) {
                     buffer.put(if (i % framesPerFlash == 0L) white else black)
                     image.timestamp = slotNanos
                     writer.queueInputImage(image)
+                    posted++
                 } catch (e: Exception) {
                     break // writer closed while stopping
                 }
                 // If we fell behind (dequeue blocked on a slow consumer), skip to the present.
-                i = maxOf(i + 1, Math.floorDiv(System.nanoTime() - epochNanos, periodNanos))
+                val next = maxOf(i + 1, Math.floorDiv(System.nanoTime() - epochNanos, periodNanos))
+                skipped += next - i - 1
+                i = next
+                if (posted % 150 == 0) Log.i(TAG, "video: posted=$posted skipped=$skipped")
             }
+            Log.i(TAG, "video: posted=$posted skipped=$skipped")
         }
         awaitClose {
             producer.interrupt()
