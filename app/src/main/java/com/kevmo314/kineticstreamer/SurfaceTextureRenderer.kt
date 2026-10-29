@@ -405,6 +405,8 @@ class SurfaceTextureRenderer {
             val textures = IntArray(1)
             GLES20.glGenTextures(1, textures, 0)
             overlayTextureId = textures[0]
+            // Replaced by the SurfaceTexture's transform once its first frame is consumed
+            Matrix.setIdentityM(overlayTextureMatrix, 0)
 
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, overlayTextureId)
             GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
@@ -432,7 +434,6 @@ class SurfaceTextureRenderer {
         overlayBounds[1] = y.toFloat() / screenHeight.toFloat()
         overlayBounds[2] = width.toFloat() / screenWidth.toFloat()
         overlayBounds[3] = height.toFloat() / screenHeight.toFloat()
-        Matrix.setIdentityM(overlayTextureMatrix, 0)
     }
 
     /**
@@ -451,6 +452,7 @@ class SurfaceTextureRenderer {
     fun setOverlay(overlayTextureId: Int, overlayTexture: SurfaceTexture?, x: Int, y: Int, width: Int, height: Int, screenWidth: Int, screenHeight: Int) {
         glHandler.post {
             this.overlayTextureId = overlayTextureId
+            if (this.overlayTexture !== overlayTexture) Matrix.setIdentityM(overlayTextureMatrix, 0)
             this.overlayTexture = overlayTexture
             hasOverlay = overlayTextureId != 0 || overlayTexture != null
             if (hasOverlay) {

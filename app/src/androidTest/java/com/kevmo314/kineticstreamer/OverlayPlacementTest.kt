@@ -4,6 +4,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.PixelFormat
+import android.graphics.SurfaceTexture
 import android.media.ImageReader
 import android.view.Surface
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -36,6 +37,7 @@ class OverlayPlacementTest {
 
     private lateinit var renderer: SurfaceTextureRenderer
     private lateinit var reader: ImageReader
+    private lateinit var video: SurfaceTexture
     private val producing = AtomicBoolean(true)
     private lateinit var producer: Thread
 
@@ -45,7 +47,7 @@ class OverlayPlacementTest {
         reader = ImageReader.newInstance(W, H, PixelFormat.RGBA_8888, 2)
         renderer.addOutputSurface(reader.surface)
 
-        val video = renderer.createVideoSurfaceTexture(W, H)
+        video = renderer.createVideoSurfaceTexture(W, H)
         renderer.attachSurfaceTexture(video)
         val videoSurface = Surface(video)
         producer = thread {
@@ -65,9 +67,11 @@ class OverlayPlacementTest {
     fun tearDown() {
         producing.set(false)
         producer.join(5000)
+        renderer.detachSurfaceTexture(video)
         renderer.removeOutputSurface(reader.surface)
         renderer.release()
         reader.close()
+        video.release()
     }
 
     private fun Canvas.drawQuadrants() {
@@ -122,8 +126,9 @@ class OverlayPlacementTest {
     private fun IntArray.px(x: Int, y: Int) = this[y * W + x]
 
     /** Samples the middle of each overlay quadrant and a pixel just outside the overlay on each side. */
-    private fun assertPlacedAt(x: Int, y: Int) {
-        val f = renderOverlayAt(x, y)
+    private fun assertPlacedAt(x: Int, y: Int) = assertQuadrants(renderOverlayAt(x, y), x, y)
+
+    private fun assertQuadrants(f: IntArray, x: Int, y: Int) {
         assertEquals("TL", TL, f.px(x + OW / 4, y + OH / 4))
         assertEquals("TR", TR, f.px(x + 3 * OW / 4, y + OH / 4))
         assertEquals("BL", BL, f.px(x + OW / 4, y + 3 * OH / 4))
@@ -139,6 +144,23 @@ class OverlayPlacementTest {
 
     @Test
     fun overlayLeftOfCentre() = assertPlacedAt(20, 50)
+
+    /** Moving an overlay whose content has not changed must not flip or otherwise disturb it. */
+    @Test
+    fun repositioningAStaticOverlayKeepsItsOrientation() {
+        renderOverlayAt(0, 0)
+        renderer.setOverlayBounds(100, 60, OW, OH, W, H)
+        val deadline = System.currentTimeMillis() + 10_000
+        while (System.currentTimeMillis() < deadline) {
+            val f = latestFrame()
+            if (f != null && f.px(100 + OW / 4, 60 + OH / 4) != BACKGROUND) {
+                assertQuadrants(f, 100, 60)
+                return
+            }
+            Thread.sleep(30)
+        }
+        fail("overlay never moved")
+    }
 
     @Test
     fun overlayAtBottomRight() = assertPlacedAt(W - OW, H - OH)
