@@ -1,7 +1,8 @@
 package com.kevmo314.kineticstreamer
 
-import android.graphics.Color
+import android.graphics.PixelFormat
 import android.graphics.SurfaceTexture
+import android.media.ImageWriter
 import android.view.Surface
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -45,34 +46,47 @@ class SyntheticSources(private val epochNanos: Long = System.nanoTime()) {
     private fun nextSlot(periodNanos: Long) = Math.floorDiv(System.nanoTime() - epochNanos, periodNanos) + 1
 
     /**
-     * Posts 1920x1088 black frames at 30 fps, white every [FLASH_PERIOD_MS]. The frame
-     * timestamp is the time the buffer is queued, which is right at its slot.
+     * Posts black frames at 30 fps, white every [FLASH_PERIOD_MS]. Each buffer is stamped with
+     * its slot time, so scheduling jitter on a loaded machine doesn't move the flash.
      */
     private fun video(renderer: SurfaceTextureRenderer): Flow<SurfaceTexture> = callbackFlow {
-        val texture = renderer.createVideoSurfaceTexture(1920, 1088)
+        val texture = renderer.createVideoSurfaceTexture(640, 360)
         val surface = Surface(texture)
+        val writer = ImageWriter.newInstance(surface, 3, PixelFormat.RGBA_8888)
         texture.setOnFrameAvailableListener({ renderer.renderFrame(it) }, renderer.glHandler)
         trySend(texture)
 
         val framesPerFlash = FLASH_PERIOD_MS * FPS / 1000
+        val periodNanos = 1_000_000_000L / FPS
         val producer = thread(name = "SyntheticVideo") {
-            var i = nextSlot(1_000_000_000L / FPS)
+            var i = nextSlot(periodNanos)
+            var white: ByteArray? = null
+            var black: ByteArray? = null
             while (!Thread.currentThread().isInterrupted) {
-                parkUntil(epochNanos + i * 1_000_000_000L / FPS)
+                val slotNanos = epochNanos + i * periodNanos
+                parkUntil(slotNanos)
                 if (Thread.currentThread().isInterrupted) break
                 try {
-                    val canvas = surface.lockCanvas(null)
-                    canvas.drawColor(if (i % framesPerFlash == 0L) Color.WHITE else Color.BLACK)
-                    surface.unlockCanvasAndPost(canvas)
+                    val image = writer.dequeueInputImage()
+                    val buffer = image.planes[0].buffer
+                    if (white == null) {
+                        white = ByteArray(buffer.remaining()) { 0xFF.toByte() }
+                        black = ByteArray(buffer.remaining()) { if (it % 4 == 3) 0xFF.toByte() else 0 }
+                    }
+                    buffer.put(if (i % framesPerFlash == 0L) white else black)
+                    image.timestamp = slotNanos
+                    writer.queueInputImage(image)
                 } catch (e: Exception) {
-                    break // surface released while closing
+                    break // writer closed while stopping
                 }
-                i++
+                // If we fell behind (dequeue blocked on a slow consumer), skip to the present.
+                i = maxOf(i + 1, Math.floorDiv(System.nanoTime() - epochNanos, periodNanos))
             }
         }
         awaitClose {
             producer.interrupt()
             producer.join(2000)
+            writer.close()
             texture.setOnFrameAvailableListener(null)
             // Release on the GL thread so it cannot race a frame being rendered
             val release = Runnable {

@@ -42,7 +42,18 @@ func main() {
 	seg := flag.Duration("seg", 12*time.Second, "how long to record the first connection before cutting it")
 	gap := flag.Duration("gap", 4*time.Second, "how long the listener stays down between connections")
 	maxRecovery := flag.Duration("max-recovery", 10*time.Second, "reconnect must deliver data within this long of the listener coming back")
+	analyzeOnly := flag.String("analyze", "", "analyze this recording, print the report and exit")
 	flag.Parse()
+
+	if *analyzeOnly != "" {
+		rep, err := e2e.Analyze(*analyzeOnly, e2e.DefaultExpectations())
+		if err != nil {
+			log.Fatal(err)
+		}
+		b, _ := json.MarshalIndent(rep, "", "  ")
+		fmt.Println(string(b))
+		return
+	}
 
 	if err := os.MkdirAll(*out, 0o755); err != nil {
 		log.Fatal(err)

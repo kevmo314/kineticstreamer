@@ -499,9 +499,14 @@ func (s *SRTSink) reconnect() error {
 		s.mux = newTSMux(sck, sck.payloadSize, s.tracks)
 		s.lastPktSndLossTotal = 0 // stats are per socket
 		s.reconnecting = false
+		pli := s.pliCallback
 		s.Unlock()
 
 		log.Printf("SRT: reconnected\n")
+		// The new connection's muxer drops video until a keyframe; ask for one now.
+		if pli != nil {
+			go pli.OnPLI()
+		}
 		return nil
 	}
 }
