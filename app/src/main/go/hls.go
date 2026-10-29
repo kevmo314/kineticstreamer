@@ -2,116 +2,167 @@ package kinetic
 
 import (
 	"context"
-	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
+	"log"
+	"math"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
+	"github.com/bluenviron/mediacommon/pkg/codecs/h264"
 	"github.com/bluenviron/mediacommon/pkg/formats/mpegts"
 )
 
+const hlsDefaultAddr = ":8080"
+
+// HLSSink serves the recordings of a BinaryDumpSink as HLS. Each recorded file
+// (one per keyframe) is a segment, served as /<pts>.ts.
 type HLSSink struct {
-	server *http.Server
+	server   *http.Server
+	listener net.Listener
 }
 
-func NewHLSSink(diskSink *BinaryDumpSink, url, bearerToken, encodedMediaFormatMimeTypes string) (*HLSSink, error) {
-	mediaFormatMimeTypes := strings.Split(encodedMediaFormatMimeTypes, ";")
-	tracks := make([]*mpegts.Track, len(mediaFormatMimeTypes))
-	for i, mediaFormatMimeType := range mediaFormatMimeTypes {
-		tracks[i] = &mpegts.Track{
-			PID:   uint16(i),
-			Codec: MediaFormatMimeType(mediaFormatMimeType).MPEGTSCodec(),
-		}
+// NewHLSSink starts serving on addr (":8080" if empty).
+func NewHLSSink(diskSink *BinaryDumpSink, addr, bearerToken, encodedMediaFormatMimeTypes string) (*HLSSink, error) {
+	if addr == "" {
+		addr = hlsDefaultAddr
 	}
-	server := http.Server{
-		Addr: ":8080",
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodGet {
-				w.WriteHeader(http.StatusMethodNotAllowed)
+	mediaFormatMimeTypes := strings.Split(encodedMediaFormatMimeTypes, ";")
+	codecs := make([]mpegts.Codec, len(mediaFormatMimeTypes))
+	for i, mediaFormatMimeType := range mediaFormatMimeTypes {
+		codecs[i] = MediaFormatMimeType(mediaFormatMimeType).MPEGTSCodec()
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /manifest.m3u8", func(w http.ResponseWriter, r *http.Request) {
+		manifest, err := diskSink.ReadManifest()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// a segment lasts until the next one starts. The last one is still being
+		// written, so assume it lasts as long as the one before it.
+		durations := make([]float64, len(manifest))
+		target := 1.0
+		for i := range manifest {
+			if i+1 < len(manifest) {
+				durations[i] = float64(manifest[i+1].PTS-manifest[i].PTS) / 1e6
+			} else if i > 0 {
+				durations[i] = durations[i-1]
+			} else {
+				durations[i] = 1
+			}
+			target = math.Max(target, durations[i])
+		}
+		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		fmt.Fprintf(w, "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:%d\n#EXT-X-MEDIA-SEQUENCE:0\n", int(math.Ceil(target)))
+		for i, m := range manifest {
+			fmt.Fprintf(w, "#EXTINF:%.3f,\n%d.ts\n", durations[i], m.PTS)
+		}
+		fmt.Fprint(w, "#EXT-X-ENDLIST\n")
+	})
+	mux.HandleFunc("GET /{segment}", func(w http.ResponseWriter, r *http.Request) {
+		name, ok := strings.CutSuffix(r.PathValue("segment"), ".ts")
+		pts, err := strconv.ParseInt(name, 10, 64)
+		if !ok || err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		manifest, err := diskSink.ReadManifest()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		for _, m := range manifest {
+			if m.PTS != pts {
+				continue
+			}
+			f, err := os.Open(m.FileAbsolutePath)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			if r.URL.Path == "/manifest.m3u8" {
-				manifest, err := diskSink.ReadManifest()
-				if err != nil {
-					w.WriteHeader(http.StatusInternalServerError)
-					return
-				}
-				w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
-				w.Write([]byte("#EXTM3U\n"))
-				w.Write([]byte("#EXT-X-TARGETDURATION:2\n"))
-				w.Write([]byte("#EXT-X-MEDIA-SEQUENCE:0\n"))
-				for _, m := range manifest {
-					w.Write([]byte(fmt.Sprintf("#EXTINF:%.3f,\n", (time.Duration(m.PTS) * time.Nanosecond).Seconds())))
-					w.Write([]byte(fmt.Sprintf("/%s/%d.ucf\n", diskSink.directory, m.PTS)))
-				}
-				w.Write([]byte("#EXT-X-ENDLIST\n"))
-			} else if strings.HasSuffix(r.URL.Path, ".ts") {
-				// parse /%d.mp4
-				pts, err := strconv.ParseInt(strings.TrimSuffix(r.URL.Path[1:], ".ts"), 10, 64)
-				if err != nil {
-					w.WriteHeader(http.StatusBadRequest)
-					return
-				}
-				manifest, err := diskSink.ReadManifest()
-				if err != nil {
-					w.WriteHeader(http.StatusInternalServerError)
-					return
-				}
-				for _, m := range manifest {
-					if m.PTS == pts {
-						w.Header().Set("Content-Type", "application/mpegts")
-						w.WriteHeader(http.StatusOK)
-						f, err := os.Open(fmt.Sprintf("%s/%d.ucf", diskSink.directory, pts))
-						if err != nil {
-							w.WriteHeader(http.StatusInternalServerError)
-							return
-						}
-						defer f.Close()
-						mtw := mpegts.NewWriter(w, tracks)
-						header := make([]byte, 16)
-						buf := make([]byte, 4096)
-						for {
-							if _, err := f.Read(header); err != nil {
-								break
-							}
-							track := int(binary.LittleEndian.Uint16(header[2:4]))
-							flags := MediaCodecBufferFlag(binary.LittleEndian.Uint16(header[0:2]))
-							pts := int64(binary.LittleEndian.Uint64(header[4:12]))
-							size := int(binary.LittleEndian.Uint32(header[12:16]))
-
-							if size > len(buf) {
-								buf = make([]byte, size)
-							}
-
-							t := tracks[track]
-
-							isKeyframe := MediaCodecBufferFlag(flags)&MediaCodecBufferFlagKeyFrame != 0
-
-							switch t.Codec.(type) {
-							case *mpegts.CodecH264, *mpegts.CodecH265:
-								mtw.WriteH26x(t, pts, pts, isKeyframe, [][]byte{buf})
-							case *mpegts.CodecMPEG4Audio:
-								mtw.WriteMPEG4Audio(t, pts, [][]byte{buf})
-							case *mpegts.CodecOpus:
-								mtw.WriteOpus(t, pts, [][]byte{buf})
-							}
-						}
-						return
-					}
-				}
-				w.WriteHeader(http.StatusNotFound)
-			} else {
-				w.WriteHeader(http.StatusNotFound)
+			defer f.Close()
+			w.Header().Set("Content-Type", "video/mp2t")
+			if err := writeSegment(w, f, codecs); err != nil {
+				log.Printf("hls segment %d: %v", pts, err)
 			}
-		}),
+			return
+		}
+		http.NotFound(w, r)
+	})
+
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
 	}
-	go server.ListenAndServe()
-	return &HLSSink{server: &server}, nil
+	server := &http.Server{Handler: mux}
+	go func() {
+		if err := server.Serve(listener); !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("hls server: %v", err)
+		}
+	}()
+	return &HLSSink{server: server, listener: listener}, nil
+}
+
+// Addr is the address the sink is listening on.
+func (s *HLSSink) Addr() net.Addr {
+	return s.listener.Addr()
 }
 
 func (s *HLSSink) Close() error {
-	return s.server.Shutdown(context.Background())
+	err := s.server.Shutdown(context.Background())
+	// Serve may not have started yet, in which case nothing else would close the listener.
+	s.listener.Close()
+	return err
+}
+
+// writeSegment remuxes the records in r to MPEG-TS.
+func writeSegment(w io.Writer, r io.Reader, codecs []mpegts.Codec) error {
+	// the writer assigns the PIDs, so every segment needs its own tracks.
+	tracks := make([]*mpegts.Track, len(codecs))
+	for i, codec := range codecs {
+		tracks[i] = &mpegts.Track{Codec: codec}
+	}
+	mtw := mpegts.NewWriter(w, tracks)
+	for {
+		sample, err := decodeRecord(r)
+		if err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				// a truncated tail is treated as the end of the segment.
+				return nil
+			}
+			return err
+		}
+		if sample.Track >= len(tracks) {
+			continue
+		}
+		t := tracks[sample.Track]
+		// mpegts timestamps are in 90kHz.
+		pts := sample.PTS * 90 / 1000
+		switch t.Codec.(type) {
+		case *mpegts.CodecH264, *mpegts.CodecH265:
+			// the AnnexB framing is the same for both codecs.
+			nalus, err := h264.AnnexBUnmarshal(sample.Data)
+			if err != nil {
+				continue
+			}
+			err = mtw.WriteH26x(t, pts, pts, sample.Flags&MediaCodecBufferFlagKeyFrame != 0, nalus)
+			if err != nil {
+				return err
+			}
+		case *mpegts.CodecMPEG4Audio:
+			if err := mtw.WriteMPEG4Audio(t, pts, [][]byte{sample.Data}); err != nil {
+				return err
+			}
+		case *mpegts.CodecOpus:
+			if err := mtw.WriteOpus(t, pts, [][]byte{sample.Data}); err != nil {
+				return err
+			}
+		}
+	}
 }
