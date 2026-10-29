@@ -419,12 +419,16 @@ class StreamingService : Service() {
             // Same reference as audio, so they remain in sync while starting near zero
             val ptsUs = info.presentationTimeUs - streamStartTimeNanos / 1000
             sinks?.writeVideo(data, ptsUs, info.flags) { estimate ->
+                // A write queued before teardown can land after the encoder is released
+                val encoder = videoEncoder ?: return@writeVideo
                 val bitrate = nextVideoBitrate(estimate, audioBitrate, lastBitrate) ?: return@writeVideo
                 Log.i(TAG, "Bitrate: estimate=${estimate / 1000}Kbps - Audio=${audioBitrate / 1000}Kbps -> Video=${bitrate / 1000}Kbps")
-                videoEncoder?.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, bitrate) })
-                lastBitrate = bitrate
+                runCatching {
+                    encoder.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, bitrate) })
+                    lastBitrate = bitrate
+                }
             }
-            fpsCounter.tick(System.currentTimeMillis())
+            if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0) fpsCounter.tick(System.currentTimeMillis())
 
             try {
                 codec.releaseOutputBuffer(index, false)
@@ -599,11 +603,13 @@ class StreamingService : Service() {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
         )
 
-        // Keep the CPU and WiFi running at low latency when the screen is off
+        // Keep the CPU and WiFi awake when the screen is off. FULL_LOW_LATENCY only holds while the
+        // screen is on, so the (deprecated, but still honoured below API 34) HIGH_PERF mode stays.
         wakeLock = (getSystemService(Context.POWER_SERVICE) as PowerManager)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "KineticStreamer::StreamingWakeLock").apply { acquire() }
+        @Suppress("DEPRECATION")
         wifiLock = (applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager)
-            .createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "KineticStreamer::WifiLock").apply { acquire() }
+            .createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "KineticStreamer::WifiLock").apply { acquire() }
 
         // The renderer runs continuously for preview
         val renderer = SurfaceTextureRenderer().also { this.renderer = it }
