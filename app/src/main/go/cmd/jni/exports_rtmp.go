@@ -105,22 +105,23 @@ func GoRTMPServerGetSource(handle int64) int64 {
 		return 0
 	}
 
-	// Check if we already have a handle for this source
 	mu.Lock()
 	defer mu.Unlock()
+	return rtmpSourceHandle(source)
+}
 
+// rtmpSourceHandle returns the existing handle for source, or allocates one.
+// Callers must hold mu.
+func rtmpSourceHandle(source *kinetic.RTMPSource) int64 {
 	for h, s := range rtmpSources {
 		if s == source {
 			return h
 		}
 	}
-
-	// Create new handle for the source
-	sourceHandle := nextHandle
+	h := nextHandle
 	nextHandle++
-	rtmpSources[sourceHandle] = source
-
-	return sourceHandle
+	rtmpSources[h] = source
+	return h
 }
 
 //export GoRTMPServerWaitForSource
@@ -139,12 +140,8 @@ func GoRTMPServerWaitForSource(handle int64, timeoutMs int32) int64 {
 	}
 
 	mu.Lock()
-	sourceHandle := nextHandle
-	nextHandle++
-	rtmpSources[sourceHandle] = source
-	mu.Unlock()
-
-	return sourceHandle
+	defer mu.Unlock()
+	return rtmpSourceHandle(source)
 }
 
 //export GoRTMPSourceReadVideoFrame

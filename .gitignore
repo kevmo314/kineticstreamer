@@ -19,3 +19,7 @@ local.properties
 !**/third_party/CMakeLists.txt
 app/src/main/libs/
 app/src/main/jniLibs/
+
+# IDE
+.idea/
+*.iml
