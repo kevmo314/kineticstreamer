@@ -1,8 +1,13 @@
 package com.kevmo314.kineticstreamer
 
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -15,9 +20,16 @@ class SettingsTest {
     @get:Rule
     val tmp = TemporaryFolder()
 
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
     private fun settings() = Settings(
-        PreferenceDataStoreFactory.create { File(tmp.root, "test.preferences_pb") }
+        PreferenceDataStoreFactory.create(scope = scope) { File(tmp.root, "test.preferences_pb") }
     )
+
+    @After
+    fun cancelScope() {
+        scope.cancel()
+    }
 
     @Test
     fun bytesToString_belowOneKiB() {
@@ -89,5 +101,20 @@ class SettingsTest {
         assertEquals(Resolution(1280, 720), s.resolution.first())
         assertEquals(4_000_000, s.bitrate.first())
         assertEquals(outputs, s.outputConfigurations.first())
+    }
+
+    @Test
+    fun settings_persistsFlagsAndAudioDevice() = runBlocking {
+        val s = settings()
+        s.setRotateVideo180(true)
+        s.setAutoOpenOnUsbCamera(true)
+        s.setRecordingMaxCapacityBytes(42)
+        s.setSelectedAudioDevice(7)
+        assertEquals(true, s.rotateVideo180.first())
+        assertEquals(true, s.autoOpenOnUsbCamera.first())
+        assertEquals(42L, s.recordingMaxCapacityBytes.first())
+        assertEquals(7, s.selectedAudioDevice.first())
+        s.setSelectedAudioDevice(null)
+        assertEquals(null, s.selectedAudioDevice.first())
     }
 }

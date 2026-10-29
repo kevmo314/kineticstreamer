@@ -88,6 +88,9 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
+      # Build first so the native compile doesn't compete with the booting emulator.
+      - run: ./gradlew assembleDebug assembleDebugAndroidTest --stacktrace
+
       - uses: reactivecircus/android-emulator-runner@v2.38.0
         with:
           api-level: 34

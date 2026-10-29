@@ -22,33 +22,35 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    env:
-      # Optional signing secrets; without them the APK is published unsigned.
-      KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-      KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-      KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-      KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v6.0.2
       - uses: ./.github/actions/setup-native
 
       - run: ./gradlew assembleRelease --stacktrace
 
+      # Optional signing secrets, only exposed to this step and only for real (tag) releases;
+      # dry runs and missing secrets produce an unsigned APK.
       - name: Align and sign
+        env:
+          SIGN: ${{ github.event_name == 'push' }}
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           out=app/build/outputs/apk/release
           bt="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
           name="kineticstreamer-${GITHUB_REF_NAME//\//-}"
-          if [ -n "$KEYSTORE_BASE64" ]; then
+          if [ "$SIGN" = true ] && [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEYSTORE_PASSWORD" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASSWORD" ]; then
+            trap 'rm -f "$RUNNER_TEMP/release.jks"' EXIT
             echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
             "$bt/zipalign" -p -f 4 "$out/app-release-unsigned.apk" "$RUNNER_TEMP/aligned.apk"
             "$bt/apksigner" sign --ks "$RUNNER_TEMP/release.jks" \
               --ks-pass env:KEYSTORE_PASSWORD --ks-key-alias "$KEY_ALIAS" --key-pass env:KEY_PASSWORD \
               --out "$name.apk" "$RUNNER_TEMP/aligned.apk"
             "$bt/apksigner" verify "$name.apk"
-            rm "$RUNNER_TEMP/release.jks"
           else
-            echo "::warning::No signing secrets configured; publishing unsigned APK"
+            echo "::warning::Not signing (dry run or signing secrets missing); APK is unsigned"
             cp "$out/app-release-unsigned.apk" "$name-unsigned.apk"
           fi
           cp app/build/outputs/mapping/release/mapping.txt "$name-mapping.txt"
