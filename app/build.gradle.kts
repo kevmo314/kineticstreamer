@@ -1,125 +1,52 @@
-import org.gradle.api.tasks.Exec
-
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.parcelize)
 }
 
-val nativeAbis = listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+// ABIs to build native code for: the device's preferred ABI as injected by Android Studio
+// (its first, comma separated), else -PnativeAbis=x86_64, else all (what CI and release want).
+val nativeAbis = providers.gradleProperty("android.injected.build.abi").map { it.substringBefore(",") }
+    .orElse(providers.gradleProperty("nativeAbis"))
+    .orElse("arm64-v8a,armeabi-v7a,x86,x86_64")
+    .get().split(",")
 val goSourceDir = layout.projectDirectory.dir("src/main/go")
 val thirdPartyOutputDir = goSourceDir.dir("third_party/output")
 val jniLibsDir = layout.projectDirectory.dir("src/main/jniLibs")
-val sharedThirdPartyLibs = listOf("libusb-1.0.so", "libsrt.so", "librist.so")
-val isWindowsHost = System.getProperty("os.name").lowercase().contains("windows")
 
-fun thirdPartyLibraries() = nativeAbis.flatMap { abi ->
-    val libDir = thirdPartyOutputDir.dir("$abi/lib")
-    val opensslLibExtension = if (isWindowsHost) "a" else "so"
-    sharedThirdPartyLibs.map { libDir.file(it) } + listOf(
-        libDir.file("libssl.$opensslLibExtension"),
-        libDir.file("libcrypto.$opensslLibExtension"),
-    )
-}
-
-fun jniLibraries() = nativeAbis.flatMap { abi ->
-    val libDir = jniLibsDir.dir(abi)
-    val requiredLibs = listOf(
-        libDir.file("libkinetic.so"),
-        libDir.file("libusb-1.0.so"),
-        libDir.file("libsrt.so"),
-        libDir.file("librist.so"),
-    )
-    if (isWindowsHost) requiredLibs else requiredLibs + listOf(
-        libDir.file("libssl.so"),
-        libDir.file("libcrypto.so"),
-    )
-}
-
-fun Exec.configureNativeBuildEnvironment() {
+// build.sh runs everywhere (Git Bash on Windows). `cmd /c` makes Windows pick bash from PATH
+// rather than the WSL launcher in System32.
+fun Exec.runBuildScript(step: String) {
+    val isWindows = System.getProperty("os.name").lowercase().contains("windows")
     workingDir = goSourceDir.asFile
-
-    // Set environment variables if needed
-    // Look for NDK in the Android SDK location, falling back to local.properties / OS defaults
-    val osName = System.getProperty("os.name").lowercase()
-    val isWindows = osName.contains("windows")
-    val isMac = osName.contains("mac") || osName.contains("darwin")
-    val sdkDirFromProps = rootProject.file("local.properties").takeIf { it.exists() }
-        ?.readLines()
-        ?.firstOrNull { it.startsWith("sdk.dir=") }
-        ?.substringAfter("sdk.dir=")
-    val androidHome = System.getenv("ANDROID_HOME") ?: sdkDirFromProps ?:
-        if (isWindows) "C:/Users/${System.getProperty("user.name")}/AppData/Local/Android/Sdk"
-        else if (isMac) "${System.getProperty("user.home")}/Library/Android/sdk"
-        else "${System.getProperty("user.home")}/Android/Sdk"
-
-    // Find the NDK version - prefer 26.x for compatibility
-    val ndkDir = file("$androidHome/ndk")
-    val ndkVersion = if (ndkDir.exists()) {
-        ndkDir.listFiles()?.filter { it.isDirectory }?.map { it.name }?.sorted()?.firstOrNull { it.startsWith("26.") }
-            ?: ndkDir.listFiles()?.filter { it.isDirectory }?.map { it.name }?.sorted()?.lastOrNull()
-    } else {
-        null
-    }
-
-    val androidNdk = System.getenv("ANDROID_NDK") ?:
-        if (ndkVersion != null) "$androidHome/ndk/$ndkVersion"
-        else "$androidHome/ndk/26.1.10909125"
-
-    environment("ANDROID_NDK", androidNdk)
-    environment("ANDROID_HOME", androidHome)
+    environment("NATIVE_ABIS", nativeAbis.joinToString(" "))
+    commandLine((if (isWindows) listOf("cmd", "/c") else emptyList()) + listOf("bash", "build.sh", step))
 }
 
 val buildThirdPartyDeps = tasks.register<Exec>("buildThirdPartyDeps") {
     group = "build"
     description = "Build third-party native dependencies used by the Go JNI library"
+    runBuildScript("deps")
 
-    configureNativeBuildEnvironment()
-
-    if (isWindowsHost) {
-        commandLine("powershell", "-ExecutionPolicy", "Bypass", "-File", "./build.ps1", "-DepsOnly")
-    } else {
-        commandLine("bash", "./build.sh", "--deps-only")
-    }
-
-    inputs.file(goSourceDir.file("build.sh"))
-    inputs.file(goSourceDir.file("build.ps1"))
     inputs.file(goSourceDir.file("third_party/CMakeLists.txt"))
-    outputs.files(thirdPartyLibraries())
-    outputs.dirs(nativeAbis.map { abi -> thirdPartyOutputDir.dir("$abi/include") })
+    outputs.dirs(nativeAbis.map { thirdPartyOutputDir.dir(it) })
 }
 
-// Task to build the Go library with native JNI
 tasks.register<Exec>("buildGoLibrary") {
     group = "build"
     description = "Build the Go kinetic library with native JNI"
     dependsOn(buildThirdPartyDeps)
-
-    configureNativeBuildEnvironment()
-
-    // Detect OS and use appropriate command
-    if (isWindowsHost) {
-        commandLine("powershell", "-ExecutionPolicy", "Bypass", "-File", "./build.ps1", "-SkipDeps")
-    } else {
-        commandLine("bash", "./build.sh", "--skip-deps")
-    }
+    runBuildScript("jni")
 
     inputs.files(fileTree(goSourceDir) {
-        include("**/*.go")
-        include("**/*.c")
-        include("**/*.h")
-        include("go.mod")
-        include("go.sum")
-        exclude("include/**")
+        include("**/*.go", "**/*.c", "**/*.h", "go.mod", "go.sum")
         exclude("third_party/**")
     })
-    inputs.files(thirdPartyLibraries())
+    inputs.dir(thirdPartyOutputDir)
     inputs.file(goSourceDir.file("build.sh"))
-    inputs.file(goSourceDir.file("build.ps1"))
-    outputs.files(jniLibraries())
+    outputs.dirs(nativeAbis.map { jniLibsDir.dir(it) })
 }
 
-// Make preBuild depend on buildGoLibrary
 tasks.named("preBuild") {
     dependsOn("buildGoLibrary")
 }
