@@ -28,7 +28,7 @@ type tsMux struct {
 
 // newTSMux muxes into w, flushing after every sample in chunks of at most size.
 func newTSMux(w io.Writer, size int, tracks []*mpegts.Track) *tsMux {
-	m := &tsMux{w: w, size: size, tracks: tracks}
+	m := &tsMux{w: w, size: size, tracks: tracks, paramSets: map[*mpegts.Track][][]byte{}}
 	m.reset()
 	return m
 }
@@ -41,7 +41,6 @@ func (m *tsMux) reset() {
 		*t = mpegts.Track{Codec: t.Codec}
 	}
 	m.sawKeyframe = false
-	m.paramSets = map[*mpegts.Track][][]byte{}
 	m.bw = bufio.NewWriterSize(m.w, m.size)
 	m.mpw = mpegts.NewWriter(m.bw, m.tracks)
 }

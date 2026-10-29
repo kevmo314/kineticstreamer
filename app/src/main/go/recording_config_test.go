@@ -176,6 +176,9 @@ func TestTSMuxParameterSetsPerTrack(t *testing.T) {
 		{b, []byte{0, 0, 0, 1, 0x67, 0xbb}, configFlag},
 		{a, idr, keyFrame},
 	} {
+		if s.flags == keyFrame {
+			m.reset() // e.g. after a write error: the encoder won't repeat its config
+		}
 		if err := m.writeSample(s.t, s.data, 0, s.flags); err != nil {
 			t.Fatal(err)
 		}
