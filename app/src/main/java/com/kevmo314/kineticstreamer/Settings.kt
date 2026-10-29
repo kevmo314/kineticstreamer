@@ -128,13 +128,4 @@ class Settings(private val dataStore: DataStore<Preferences>) {
     suspend fun setRotateVideo180(enabled: Boolean) {
         dataStore.edit { it[_rotateVideo180] = enabled }
     }
-
-    suspend fun getStreamingConfiguration(): StreamingConfiguration {
-//        val codec = codec.first().mimeType
-        return StreamingConfiguration(
-            MediaFormat.MIMETYPE_VIDEO_AVC,
-            MediaFormat.MIMETYPE_AUDIO_OPUS,
-            MediaMuxer.OutputFormat.MUXER_OUTPUT_WEBM
-        )
-    }
 }

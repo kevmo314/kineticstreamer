@@ -3,13 +3,12 @@ package com.kevmo314.kineticstreamer;
 
 import com.kevmo314.kineticstreamer.IAudioLevelCallback;
 
-parcelable StreamingConfiguration;
 parcelable VideoSourceDevice;
 
 interface IStreamingService {
     void setPreviewSurface(in android.view.Surface surface);
 
-    void startStreaming(in StreamingConfiguration configuration);
+    void startStreaming();
 
     void stopStreaming();
 

@@ -89,6 +89,10 @@ android {
         compose = true
         aidl = true
     }
+    testOptions {
+        unitTests.isReturnDefaultValues = true // android.util.Log in JVM tests
+    }
+
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"

@@ -103,7 +103,7 @@ class StreamingE2ETest {
         assertTrue("service did not bind", bound.await(15, TimeUnit.SECONDS))
 
         val svc = service!!
-        svc.startStreaming(StreamingConfiguration("video/avc", "audio/mp4a-latm", 0))
+        svc.startStreaming()
         assertTrue("not streaming after start", svc.isStreaming)
         // The receiver cuts the first connection after 12s and is down for 4s, so this leaves
         // time for the sink to reconnect and for 8+ seconds of the second recording.

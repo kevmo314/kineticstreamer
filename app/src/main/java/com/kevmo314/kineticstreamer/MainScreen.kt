@@ -300,8 +300,7 @@ fun MainScreen(
                                             if (isStreaming.value) {
                                                 withContext(Dispatchers.IO) { stub.stopStreaming() }
                                             } else {
-                                                val configuration = settings.getStreamingConfiguration()
-                                                withContext(Dispatchers.IO) { stub.startStreaming(configuration) }
+                                                withContext(Dispatchers.IO) { stub.startStreaming() }
                                             }
                                             // startStreaming can bail out on failure, so ask the service.
                                             isStreaming.value = withContext(Dispatchers.IO) { stub.isStreaming }

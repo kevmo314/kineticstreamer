@@ -93,10 +93,9 @@ class StreamingServiceLifecycleTest {
 
     private fun cycle(failing: Boolean) {
         val svc = service!!
-        val config = StreamingConfiguration("video/avc", "audio/mp4a-latm", 0)
 
         // Warm-up so one-time threads (binder, native, dispatchers) are already counted.
-        svc.startStreaming(config)
+        svc.startStreaming()
         svc.stopStreaming()
         Thread.sleep(2000)
         val baseline = threadCount()
@@ -104,7 +103,7 @@ class StreamingServiceLifecycleTest {
 
         val counts = mutableListOf<Int>()
         repeat(8) { i ->
-            svc.startStreaming(config)
+            svc.startStreaming()
             assertTrue("cycle $i: streaming after start (failing=$failing)", svc.isStreaming != failing)
             svc.stopStreaming()
             assertFalse("cycle $i: streaming after stop", svc.isStreaming)
