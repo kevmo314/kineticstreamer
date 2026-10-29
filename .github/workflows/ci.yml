@@ -93,13 +93,12 @@ jobs:
 
       # Host side of StreamingE2ETest: an SRT receiver that records the stream and checks it
       # (ffmpeg decodes it for the A/V sync measurement). The emulator reaches it at 10.0.2.2.
-      - name: Start end-to-end receiver
+      - name: Build end-to-end receiver
         working-directory: app/src/main/go
         run: |
           sudo apt-get install -y ffmpeg libsrt-openssl-dev librist-dev
           go build -o "$RUNNER_TEMP/e2erecv" ./cmd/e2erecv
           mkdir -p "$RUNNER_TEMP/e2e-out"
-          nohup "$RUNNER_TEMP/e2erecv" -out "$RUNNER_TEMP/e2e-out" > "$RUNNER_TEMP/e2erecv.log" 2>&1 &
 
       - uses: reactivecircus/android-emulator-runner@v2.38.0
         with:
@@ -107,7 +106,7 @@ jobs:
           arch: x86_64
           disk-size: 8192M
           ram-size: 4096M
-          script: ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.e2eRequired=true --stacktrace
+          script: bash .github/scripts/run-instrumented.sh
 
       # Per-test results, so a suite that silently runs nothing (or skips tests) is visible.
       - name: Instrumented test summary
