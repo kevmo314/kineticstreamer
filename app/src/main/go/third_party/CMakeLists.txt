@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.22.1)
 
+# Android API level for every dependency. Must match ANDROID_API in ../build.sh.
+set(ANDROID_API 24)
+set(ANDROID_PLATFORM android-${ANDROID_API})
+
 project(kinetic)
 
 include(ExternalProject)
@@ -8,28 +12,23 @@ include(ExternalProject)
 set(PAGE_SIZE_LINKER_FLAGS "-Wl,-z,max-page-size=16384")
 
 # Host tag for NDK prebuilt toolchains (linux-x86_64, darwin-x86_64, windows-x86_64).
+# OpenSSL is built static so it ends up inside libsrt.so rather than as extra
+# shared libs in the APK. Only libcrypto/libssl are built (no apps, tests, docs).
+string(TOLOWER "${CMAKE_HOST_SYSTEM_NAME}" _HOST_OS)
+set(NDK_HOST_TAG "${_HOST_OS}-x86_64")
+set(OPENSSL_MAKE_JOBS 4)
+set(OPENSSL_PERL_ENV "")
+set(OPENSSL_ANDROID_NDK_ROOT "${ANDROID_NDK}")
+set(OPENSSL_CONFIGURE_OPTIONS no-shared no-apps no-tests no-docs no-legacy no-engine no-comp)
 # OPENSSL_PATH_ENV pins the PATH for the OpenSSL Configure/make pipeline so the
 # build is reproducible. Windows uses ';' as PATH separator, so libopenssl uses
 # ExternalProject's LIST_SEPARATOR to keep PATH as one cmake -E env argument.
-if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
-    set(NDK_HOST_TAG "linux-x86_64")
-    set(OPENSSL_MAKE_JOBS 4)
-    set(OPENSSL_LIB_EXT ".so")
-    set(OPENSSL_CONFIGURE_OPTIONS no-apps no-tests no-docs)
-    set(OPENSSL_PATH_ENV "PATH=${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin:/usr/bin:/bin")
-    set(OPENSSL_CONFIGURE ./Configure)
-elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
-    set(NDK_HOST_TAG "darwin-x86_64")
-    set(OPENSSL_MAKE_JOBS 4)
-    set(OPENSSL_LIB_EXT ".so")
-    set(OPENSSL_CONFIGURE_OPTIONS no-apps no-tests no-docs)
+if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
     set(OPENSSL_PATH_ENV "PATH=${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin:/usr/bin:/bin")
     set(OPENSSL_CONFIGURE ./Configure)
 elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
-    set(NDK_HOST_TAG "windows-x86_64")
     set(OPENSSL_MAKE_JOBS 2)
-    set(OPENSSL_LIB_EXT ".a")
-    set(OPENSSL_CONFIGURE_OPTIONS no-shared no-asm no-apps no-tests no-docs)
+    list(APPEND OPENSSL_CONFIGURE_OPTIONS no-asm)
     string(REPLACE ";" "|" _HOST_PATH "$ENV{PATH}")
     if (DEFINED ENV{OPENSSL_PERL})
         get_filename_component(OPENSSL_PERL_DIR "$ENV{OPENSSL_PERL}" DIRECTORY)
@@ -42,9 +41,7 @@ elseif (CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
         set(OPENSSL_PERL_ENV "PERL=$ENV{OPENSSL_PERL}")
         set(OPENSSL_CONFIGURE "$ENV{OPENSSL_PERL}" Configure)
     else()
-        set(OPENSSL_ANDROID_NDK_ROOT "${ANDROID_NDK}")
         set(OPENSSL_PATH_ENV "PATH=${ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin|${_HOST_PATH}")
-        set(OPENSSL_PERL_ENV "")
         set(OPENSSL_CONFIGURE perl Configure)
     endif()
     # cmd.exe doesn't honour unix shebangs, so invoke the perl script explicitly.
@@ -52,24 +49,13 @@ else()
     message(FATAL_ERROR "Unsupported host system: ${CMAKE_HOST_SYSTEM_NAME}")
 endif()
 
-if (NOT DEFINED OPENSSL_PATCH_COMMAND)
-    set(OPENSSL_PATCH_COMMAND "")
-endif()
-if (NOT DEFINED OPENSSL_PERL_ENV)
-    set(OPENSSL_PERL_ENV "")
-endif()
-if (NOT DEFINED OPENSSL_ANDROID_NDK_ROOT)
-    set(OPENSSL_ANDROID_NDK_ROOT "${ANDROID_NDK}")
-endif()
-
 set(ANDROID_CMAKE_ARGS
         -DANDROID_ABI=${ANDROID_ABI}
         -DANDROID_PLATFORM=${ANDROID_PLATFORM}
-        -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=${CMAKE_LIBRARY_OUTPUT_DIRECTORY}
-        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+        -DCMAKE_BUILD_TYPE=Release
         -DANDROID_NDK=${ANDROID_NDK}
-        -DCMAKE_C_FLAGS=${CMAKE_C_FLAGS}
-        -DCMAKE_CXX_FLAGS=${CMAKE_CXX_FLAGS}
+        -DCMAKE_C_FLAGS=-fPIC
+        -DCMAKE_CXX_FLAGS=-fPIC
         -DCMAKE_SHARED_LINKER_FLAGS=${PAGE_SIZE_LINKER_FLAGS}
         -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
         -DCMAKE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}
@@ -120,7 +106,6 @@ ExternalProject_Add(libopenssl
         GIT_SHALLOW 1
         GIT_SUBMODULES ""  # disable git submodules
         LIST_SEPARATOR |
-        PATCH_COMMAND ${OPENSSL_PATCH_COMMAND}
         BUILD_IN_SOURCE 1
         CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${OPENSSL_ANDROID_NDK_ROOT} ${OPENSSL_PERL_ENV} ${OPENSSL_PATH_ENV} "CC=${OPENSSL_CC}" "CXX=${OPENSSL_CXX}" "CFLAGS=-fPIC" "CXXFLAGS=-fPIC" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" ${OPENSSL_CONFIGURE} ${SSL_TARGET} ${OPENSSL_CONFIGURE_OPTIONS} -D__ANDROID_API__=${ANDROID_API} --prefix=${CMAKE_INSTALL_PREFIX} --openssldir=${CMAKE_INSTALL_PREFIX}
         BUILD_COMMAND ${CMAKE_COMMAND} -E env ANDROID_NDK_ROOT=${OPENSSL_ANDROID_NDK_ROOT} ${OPENSSL_PERL_ENV} ${OPENSSL_PATH_ENV} "CC=${OPENSSL_CC}" "CXX=${OPENSSL_CXX}" "CFLAGS=-fPIC" "CXXFLAGS=-fPIC" "LDFLAGS=${PAGE_SIZE_LINKER_FLAGS}" make -j${OPENSSL_MAKE_JOBS} build_libs
@@ -136,18 +121,19 @@ ExternalProject_Add(libsrt
         -DSSL_FOUND=0  # this is a total hack, for some reason cmake keeps picking up openssl via pkg-config so manually disable it.
         -DUSE_OPENSSL_PC=OFF
         -DOPENSSL_INCLUDE_DIR=${CMAKE_INSTALL_PREFIX}/include
-        -DOPENSSL_CRYPTO_LIBRARY=${CMAKE_INSTALL_PREFIX}/lib/libcrypto${OPENSSL_LIB_EXT}
-        -DOPENSSL_SSL_LIBRARY=${CMAKE_INSTALL_PREFIX}/lib/libssl${OPENSSL_LIB_EXT}
+        -DOPENSSL_CRYPTO_LIBRARY=${CMAKE_INSTALL_PREFIX}/lib/libcrypto.a
+        -DOPENSSL_SSL_LIBRARY=${CMAKE_INSTALL_PREFIX}/lib/libssl.a
         -DCMAKE_SYSTEM_NAME=Android
         -DCMAKE_SYSTEM_VERSION=${ANDROID_API}
         -DCMAKE_ANDROID_ARCH_ABI=${ANDROID_ABI}
         -DCMAKE_ANDROID_NDK=${ANDROID_NDK}
         -DCMAKE_INSTALL_PREFIX=${CMAKE_INSTALL_PREFIX}
-        -DCMAKE_C_FLAGS=${CMAKE_C_FLAGS}
-        -DCMAKE_CXX_FLAGS=${CMAKE_CXX_FLAGS}
+        -DCMAKE_C_FLAGS=-fPIC
+        -DCMAKE_CXX_FLAGS=-fPIC
         -DCMAKE_SHARED_LINKER_FLAGS=${PAGE_SIZE_LINKER_FLAGS}
         -DENABLE_BONDING=ON
         -DENABLE_APPS=OFF
+        -DENABLE_STATIC=OFF
         DEPENDS libopenssl
 )
 
