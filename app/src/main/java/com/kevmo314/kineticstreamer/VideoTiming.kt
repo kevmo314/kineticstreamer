@@ -38,6 +38,7 @@ class DecoderFeeder(private val sink: Sink) {
     fun feed(data: ByteArray, ptsUs: Long, flags: Int = 0): Boolean {
         while (!closed) {
             val index = freeIndices.poll(50, TimeUnit.MILLISECONDS) ?: continue
+            if (closed) return false // closed while waiting; the codec is going away
             sink.queue(index, data, ptsUs, flags)
             return true
         }

@@ -32,6 +32,7 @@ import kotlin.coroutines.resume
 import com.kevmo314.kineticstreamer.kinetic.RTMPServer
 import com.kevmo314.kineticstreamer.kinetic.RTMPSource
 import com.kevmo314.kineticstreamer.kinetic.UVCSource
+import com.kevmo314.kineticstreamer.kinetic.UVCStream
 
 data class CameraSessionResult(val device: CameraDevice?, val session: CameraCaptureSession?)
 
@@ -46,7 +47,8 @@ suspend fun openCamera(cameraManager: CameraManager, outputSurface: Surface, han
 
     fun finish(result: CameraSessionResult) {
         if (resumed.compareAndSet(false, true)) {
-            if (result.device == null) device.get()?.close()
+            // A cancelled caller never receives the result, so nobody else would close the device
+            if (result.device == null || !continuation.isActive) device.get()?.close()
             continuation.resume(result)
         }
     }
@@ -57,6 +59,10 @@ suspend fun openCamera(cameraManager: CameraManager, outputSurface: Surface, han
         cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
             override fun onOpened(camera: CameraDevice) {
                 device.set(camera)
+                if (!continuation.isActive) { // cancelled while opening
+                    camera.close()
+                    return
+                }
                 try {
                     val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                         addTarget(outputSurface)
@@ -155,7 +161,11 @@ class H264DecoderPipeline(
                 feeder.onInputBufferAvailable(index)
 
             override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
-                codec.releaseOutputBuffer(index, true)
+                try {
+                    codec.releaseOutputBuffer(index, info.size > 0)
+                } catch (e: IllegalStateException) {
+                    // decoder stopped by close()
+                }
             }
 
             override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
@@ -171,8 +181,13 @@ class H264DecoderPipeline(
                 renderer?.setDecoderCrop(height, cropTop, cropBottom)
             }
         })
-        decoder.configure(format, outputSurface, null, 0)
-        decoder.start()
+        try {
+            decoder.configure(format, outputSurface, null, 0)
+            decoder.start()
+        } catch (e: Exception) {
+            decoder.release()
+            throw e
+        }
 
         frameThread = thread(name = "$tag-frames") {
             try {
@@ -209,6 +224,15 @@ class H264DecoderPipeline(
     }
 }
 
+private fun closeUvcSource(source: UVCSource) {
+    try {
+        source.close()
+    } catch (e: UnsatisfiedLinkError) {
+        // native UVCSource.close is only available once #19 lands
+        Log.w("VideoSource", "UVCSource.close not available: ${e.message}")
+    }
+}
+
 private fun openUsbCamera(context: Context, device: UsbDevice, outputSurface: Surface, renderer: SurfaceTextureRenderer?): Closeable? {
     val manager = context.getSystemService(Context.USB_SERVICE) as UsbManager
     val conn = manager.openDevice(device)
@@ -217,6 +241,8 @@ private fun openUsbCamera(context: Context, device: UsbDevice, outputSurface: Su
         return null
     }
 
+    var uvcSource: UVCSource? = null
+    var stream: UVCStream? = null
     try {
         // Claim video interfaces with force=true to detach kernel uvcvideo driver
         // This leaves audio interfaces (2, 3, 4) for snd-usb-audio
@@ -229,25 +255,22 @@ private fun openUsbCamera(context: Context, device: UsbDevice, outputSurface: Su
             }
         }
 
-        val uvcSource = UVCSource(conn.fileDescriptor)
-        val stream = uvcSource.startStreaming(8, 1920, 1080, 30)
+        val source = UVCSource(conn.fileDescriptor).also { uvcSource = it }
+        val uvc = source.startStreaming(8, 1920, 1080, 30).also { stream = it }
         val pipeline = H264DecoderPipeline(
             "UvcDecoder", outputSurface, renderer,
             // Arrival time is CLOCK_MONOTONIC, the clock AudioRecord timestamps use
-            { stream.readFrame()?.let { FrameWithPTS(it, stream.getArrivalTimeNs() / 1000) } },
-            { stream.close() },
+            { uvc.readFrame()?.let { FrameWithPTS(it, uvc.getArrivalTimeNs() / 1000) } },
+            { uvc.close() },
         )
         return Closeable {
             pipeline.close() // closes the stream
-            try {
-                uvcSource.close() // releases the USB device claim
-            } catch (e: UnsatisfiedLinkError) {
-                // native UVCSource.close is only available once #19 lands
-                Log.w("VideoSource", "UVCSource.close not available: ${e.message}")
-            }
+            closeUvcSource(source) // releases the USB device claim
             conn.close()
         }
     } catch (e: Throwable) {
+        stream?.close()
+        uvcSource?.let { closeUvcSource(it) }
         conn.close()
         throw e
     }
@@ -461,34 +484,39 @@ fun VideoSource(context: Context,
             is VideoSourceDevice.RtmpServer -> {
                 Log.i("VideoSource", "Starting RTMP server on port ${device.port}")
                 val server = RTMPServer(device.port)
+                register(server)
                 if (!server.start()) {
                     Log.e("VideoSource", "Failed to start RTMP server")
+                    closeAll()
                     close()
                     return@callbackFlow
                 }
-                register(server)
                 Log.i("VideoSource", "RTMP server started, waiting for publisher...")
 
                 // Wait for a publisher to connect (blocking in background thread)
                 thread(name = "RtmpWaiter") {
+                    var source: RTMPSource? = null
                     try {
-                        val source = server.waitForSource(60000) // Wait up to 60 seconds
+                        source = server.waitForSource(60000) // Wait up to 60 seconds
                         if (source == null) {
                             Log.w("VideoSource", "No RTMP publisher connected within timeout")
                             return@thread
                         }
+                        val src: RTMPSource = source
                         Log.i("VideoSource", "RTMP publisher connected!")
                         // Share the source with audio pipeline
-                        rtmpSourceRef?.set(source)
+                        rtmpSourceRef?.set(src)
                         register(
                             H264DecoderPipeline(
                                 "RtmpDecoder", outputSurface, renderer,
-                                { if (source.isClosed()) null else source.readVideoFrame()?.let { FrameWithPTS(it, source.getVideoPTS()) } },
-                                { source.close() },
+                                { if (src.isClosed()) null else src.readVideoFrame()?.let { FrameWithPTS(it, src.getVideoPTS()) } },
+                                { src.close() },
                             )
                         )
                     } catch (e: Exception) {
                         // e.g. the surface was released because the flow closed meanwhile
+                        source?.close()
+                        rtmpSourceRef?.compareAndSet(source, null)
                         Log.e("VideoSource", "Failed to start RTMP decoder: ${e.message}")
                     }
                 }
