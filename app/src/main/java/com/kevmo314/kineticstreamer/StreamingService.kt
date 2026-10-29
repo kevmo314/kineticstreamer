@@ -202,7 +202,7 @@ class StreamingService : Service() {
             }
         }
 
-        override fun startStreaming(config: StreamingConfiguration) {
+        override fun startStreaming() {
             synchronized(lifecycleLock) {
                 if (streaming) {
                     Log.w(TAG, "Already streaming")
@@ -284,7 +284,6 @@ class StreamingService : Service() {
         override fun removeWebViewOverlay() {
             webViewOverlay?.release()
             webViewOverlay = null
-            renderer?.removeOverlay()
 
             Log.i(TAG, "WebView overlay removed")
         }
