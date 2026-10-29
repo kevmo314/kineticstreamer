@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    defaults:
+      run:
+        working-directory: app/src/main/go
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - uses: actions/setup-go@v6.4.0
+        with:
+          go-version: '1.25'
+          cache: true
+          cache-dependency-path: app/src/main/go/go.sum
+
+      # The host CGO build of srt.go / rist.go links against system libsrt and librist.
+      - name: Install host libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsrt-openssl-dev librist-dev
+
+      - name: Install host libraries (macOS)
+        if: runner.os == 'macOS'
+        run: brew install srt librist
+
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+
+      # cmd/jni is Android-only (links libandroid / liblog), so only the root package is checked on the host.
+      - name: go vet
+        run: go vet .
+
+      - name: go test
+        run: go test -race -timeout 300s .
+
+  android:
+    name: Unit tests, lint, debug APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: ./.github/actions/setup-native
+      - run: ./gradlew testDebugUnitTest lint assembleDebug --stacktrace
+
+      - name: Upload reports
+        if: failure()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: android-reports
+          path: |
+            app/build/reports
+            app/build/test-results
+
+  instrumented:
+    name: Instrumented tests (emulator x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: ./.github/actions/setup-native
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - uses: reactivecircus/android-emulator-runner@v2.38.0
+        with:
+          api-level: 34
+          arch: x86_64
+          script: ./gradlew connectedDebugAndroidTest --stacktrace
+
+      - name: Upload reports
+        if: failure()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: instrumented-reports
+          path: app/build/reports

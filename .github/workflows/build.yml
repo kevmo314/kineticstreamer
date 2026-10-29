@@ -7,6 +7,13 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build Debug APK (${{ matrix.os }})
@@ -36,6 +43,8 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4.0.1
+        with:
+          packages: platform-tools
 
       - name: Setup Android NDK
         id: setup-ndk

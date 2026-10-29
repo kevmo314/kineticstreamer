@@ -1,0 +1,72 @@
+name: Release
+
+# Pushing a v* tag builds the release APK (all ABIs) and attaches it to a GitHub Release.
+# Manual runs, and PRs that touch the release/build setup, dry-run: the APK is uploaded as a
+# workflow artifact only.
+on:
+  push:
+    tags: [ 'v*' ]
+  pull_request:
+    paths: [ '.github/workflows/release.yml', '.github/actions/**' ]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      # Optional signing secrets; without them the APK is published unsigned.
+      KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: ./.github/actions/setup-native
+
+      - run: ./gradlew assembleRelease --stacktrace
+
+      - name: Align and sign
+        run: |
+          out=app/build/outputs/apk/release
+          bt="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+          name="kineticstreamer-${GITHUB_REF_NAME//\//-}"
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            "$bt/zipalign" -p -f 4 "$out/app-release-unsigned.apk" "$RUNNER_TEMP/aligned.apk"
+            "$bt/apksigner" sign --ks "$RUNNER_TEMP/release.jks" \
+              --ks-pass env:KEYSTORE_PASSWORD --ks-key-alias "$KEY_ALIAS" --key-pass env:KEY_PASSWORD \
+              --out "$name.apk" "$RUNNER_TEMP/aligned.apk"
+            "$bt/apksigner" verify "$name.apk"
+            rm "$RUNNER_TEMP/release.jks"
+          else
+            echo "::warning::No signing secrets configured; publishing unsigned APK"
+            cp "$out/app-release-unsigned.apk" "$name-unsigned.apk"
+          fi
+          cp app/build/outputs/mapping/release/mapping.txt "$name-mapping.txt"
+
+      - name: Upload build artifacts
+        if: github.event_name != 'push'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: release-dry-run
+          path: |
+            kineticstreamer-*.apk
+            kineticstreamer-*-mapping.txt
+
+      - name: Publish GitHub Release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v3.0.3
+        with:
+          generate_release_notes: true
+          files: |
+            kineticstreamer-*.apk
+            kineticstreamer-*-mapping.txt
