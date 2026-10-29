@@ -27,9 +27,8 @@ class WebViewOverlay(private val context: Context) {
         private const val TAG = "WebViewOverlay"
     }
 
-    // The WebView, its container and the capture are only touched on the main thread.
+    // The WebView and the capture are only touched on the main thread.
     private var webView: WebView? = null
-    private var containerView: FrameLayout? = null
     private var surfaceCapture: WebViewSurfaceCapture? = null
     private var renderer: SurfaceTextureRenderer? = null
 
@@ -69,24 +68,26 @@ class WebViewOverlay(private val context: Context) {
             success.set(initializeOnMainThread(url))
             latch.countDown()
         }
-        return try {
-            latch.await(5, TimeUnit.SECONDS) && success.get()
+        // The first WebView in a process can take a long time to create.
+        val completed = try {
+            latch.await(30, TimeUnit.SECONDS)
         } catch (e: InterruptedException) {
             Thread.currentThread().interrupt()
             false
         }
+        if (!completed) {
+            // Initialization may still finish later; queue a teardown behind it.
+            mainHandler.post { teardownOnMainThread() }
+            return false
+        }
+        return success.get()
     }
 
     private fun initializeOnMainThread(url: String): Boolean {
         teardownOnMainThread()
         val gl = renderer
         try {
-            val container = FrameLayout(context).apply {
-                layoutParams = FrameLayout.LayoutParams(overlayWidth, overlayHeight)
-            }
             val view = createWebView()
-            container.addView(view)
-            containerView = container
             webView = view
 
             view.measure(
@@ -186,7 +187,7 @@ class WebViewOverlay(private val context: Context) {
         val h = overlayHeight
         if (sizeChanged) {
             mainHandler.post {
-                containerView?.layoutParams = FrameLayout.LayoutParams(w, h)
+                surfaceCapture?.resize(w, h)
                 webView?.layoutParams = FrameLayout.LayoutParams(w, h)
                 webView?.requestLayout()
             }
@@ -240,9 +241,6 @@ class WebViewOverlay(private val context: Context) {
         surfaceCapture?.release()
         surfaceCapture = null
 
-        containerView?.removeAllViews()
-        containerView = null
-
         webView?.apply {
             stopLoading()
             destroy()
@@ -257,13 +255,23 @@ class WebViewOverlay(private val context: Context) {
     }
 
     /**
-     * Release all resources. Safe to call from any thread.
+     * Release all resources. Safe to call from any thread; off the main thread this waits for the
+     * teardown, so callers can rely on the capture being gone before they touch the renderer.
      */
     fun release() {
         if (Looper.myLooper() == Looper.getMainLooper()) {
             teardownOnMainThread()
         } else {
-            mainHandler.post { teardownOnMainThread() }
+            val latch = CountDownLatch(1)
+            mainHandler.post {
+                teardownOnMainThread()
+                latch.countDown()
+            }
+            try {
+                latch.await(5, TimeUnit.SECONDS)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
         }
         Log.i(TAG, "WebViewOverlay released")
     }

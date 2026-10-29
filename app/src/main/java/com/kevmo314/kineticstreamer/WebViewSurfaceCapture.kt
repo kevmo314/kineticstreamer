@@ -21,9 +21,9 @@ import androidx.core.graphics.drawable.toDrawable
  */
 class WebViewSurfaceCapture(
     private val context: Context,
-    private val width: Int,
-    private val height: Int,
-    surfaceTexture: SurfaceTexture,
+    private var width: Int,
+    private var height: Int,
+    private val surfaceTexture: SurfaceTexture,
 ) {
     companion object {
         private const val TAG = "WebViewSurfaceCapture"
@@ -55,6 +55,14 @@ class WebViewSurfaceCapture(
         virtualDisplay = display
         presentation = WebViewPresentation(display.display, webView).also { it.show() }
         return true
+    }
+
+    /** Resizes the capture, including the buffers the WebView renders into. */
+    fun resize(width: Int, height: Int) {
+        this.width = width
+        this.height = height
+        surfaceTexture.setDefaultBufferSize(width, height)
+        virtualDisplay?.resize(width, height, context.resources.displayMetrics.densityDpi)
     }
 
     /** Hosts the WebView on the VirtualDisplay. */

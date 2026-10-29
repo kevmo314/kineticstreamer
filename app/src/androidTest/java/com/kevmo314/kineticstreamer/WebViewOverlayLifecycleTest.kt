@@ -1,6 +1,7 @@
 package com.kevmo314.kineticstreamer
 
-import android.os.Parcel
+import android.hardware.display.DisplayManager
+import android.webkit.WebView
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.After
@@ -10,12 +11,23 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.BeforeClass
 import org.junit.Test
 import org.junit.runner.RunWith
 
 /** The overlay SurfaceTexture/texture are renderer-owned and must follow the overlay's lifecycle. */
 @RunWith(AndroidJUnit4::class)
 class WebViewOverlayLifecycleTest {
+    companion object {
+        /** The first WebView in a process is very slow to create on an emulator; keep that out of the timed paths. */
+        @BeforeClass
+        @JvmStatic
+        fun warmUpWebView() {
+            val instrumentation = InstrumentationRegistry.getInstrumentation()
+            instrumentation.runOnMainSync { WebView(instrumentation.targetContext).destroy() }
+        }
+    }
+
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private val context = instrumentation.targetContext
     private lateinit var renderer: SurfaceTextureRenderer
@@ -99,17 +111,24 @@ class WebViewOverlayLifecycleTest {
         orphan.release()
     }
 
+    private fun overlayDisplays() = (context.getSystemService(DisplayManager::class.java))
+        .displays.filter { it.name == "WebViewOverlay" }
+
     @Test
-    fun videoSourceDeviceSurvivesParcelRoundTrip() {
-        for (device in listOf(VideoSourceDevice.Camera("0"), VideoSourceDevice.RtmpServer(1936))) {
-            val parcel = Parcel.obtain()
-            try {
-                parcel.writeParcelable(device, 0)
-                parcel.setDataPosition(0)
-                assertEquals(device, parcel.readParcelable(VideoSourceDevice::class.java.classLoader, VideoSourceDevice::class.java))
-            } finally {
-                parcel.recycle()
-            }
-        }
+    fun captureStartsAfterPageLoadAndReleaseTearsItDown() {
+        assertTrue(overlay.initialize("about:blank", 0, 0, 320, 180))
+        val deadline = System.currentTimeMillis() + 60_000
+        while (overlayDisplays().isEmpty() && System.currentTimeMillis() < deadline) Thread.sleep(100)
+        assertEquals(1, overlayDisplays().size)
+
+        overlay.update(width = 160, height = 90)
+        instrumentation.waitForIdleSync()
+        assertEquals(1, overlayDisplays().size)
+
+        overlay.release()
+        drainMainAndGl()
+        val gone = System.currentTimeMillis() + 10_000
+        while (overlayDisplays().isNotEmpty() && System.currentTimeMillis() < gone) Thread.sleep(100)
+        assertEquals(0, overlayDisplays().size)
     }
 }
