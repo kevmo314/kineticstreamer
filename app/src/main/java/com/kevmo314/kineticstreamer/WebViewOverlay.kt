@@ -100,7 +100,7 @@ class WebViewOverlay(private val context: Context) {
             val texture = checkNotNull(gl) { "No renderer" }.createOverlayTexture(overlayWidth, overlayHeight)
             overlayTexture = texture
             surfaceCapture = WebViewSurfaceCapture(context, overlayWidth, overlayHeight, texture)
-            gl.setOverlayBounds(overlayX, overlayY, overlayWidth, overlayHeight, 1920, 1080)
+            gl.setOverlayBounds(overlayX, overlayY, overlayWidth, overlayHeight, VIDEO_WIDTH, VIDEO_HEIGHT)
 
             view.loadUrl(url)
             return true
@@ -210,7 +210,7 @@ class WebViewOverlay(private val context: Context) {
             }
         }
 
-        renderer?.setOverlayBounds(overlayX, overlayY, overlayWidth, overlayHeight, 1920, 1080)
+        renderer?.setOverlayBounds(overlayX, overlayY, overlayWidth, overlayHeight, VIDEO_WIDTH, VIDEO_HEIGHT)
     }
 
     /**

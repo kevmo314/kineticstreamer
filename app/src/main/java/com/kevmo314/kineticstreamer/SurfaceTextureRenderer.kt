@@ -179,10 +179,6 @@ class SurfaceTextureRenderer {
     @Volatile
     var timestampOffsetNanos: Long = 0
 
-    // Stream start time for wall-clock timestamp synchronization with audio
-    @Volatile
-    var streamStartTimeNanos: Long = 0
-
     init {
         runOnGl {
             setupEGL()
@@ -409,6 +405,8 @@ class SurfaceTextureRenderer {
             val textures = IntArray(1)
             GLES20.glGenTextures(1, textures, 0)
             overlayTextureId = textures[0]
+            // Replaced by the SurfaceTexture's transform once its first frame is consumed
+            Matrix.setIdentityM(overlayTextureMatrix, 0)
 
             GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, overlayTextureId)
             GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
@@ -428,15 +426,14 @@ class SurfaceTextureRenderer {
     }
 
     /**
-     * Convert pixel bounds to normalized coordinates. X is mirrored to account for the
-     * video coordinate system.
+     * Convert pixel bounds (origin top-left, relative to a [screenWidth]x[screenHeight] frame)
+     * to normalized coordinates.
      */
     private fun updateOverlayBounds(x: Int, y: Int, width: Int, height: Int, screenWidth: Int, screenHeight: Int) {
-        overlayBounds[0] = 1.0f - (x.toFloat() + width.toFloat()) / screenWidth.toFloat()
+        overlayBounds[0] = x.toFloat() / screenWidth.toFloat()
         overlayBounds[1] = y.toFloat() / screenHeight.toFloat()
         overlayBounds[2] = width.toFloat() / screenWidth.toFloat()
         overlayBounds[3] = height.toFloat() / screenHeight.toFloat()
-        Matrix.setIdentityM(overlayTextureMatrix, 0)
     }
 
     /**
@@ -455,6 +452,7 @@ class SurfaceTextureRenderer {
     fun setOverlay(overlayTextureId: Int, overlayTexture: SurfaceTexture?, x: Int, y: Int, width: Int, height: Int, screenWidth: Int, screenHeight: Int) {
         glHandler.post {
             this.overlayTextureId = overlayTextureId
+            if (this.overlayTexture !== overlayTexture) Matrix.setIdentityM(overlayTextureMatrix, 0)
             this.overlayTexture = overlayTexture
             hasOverlay = overlayTextureId != 0 || overlayTexture != null
             if (hasOverlay) {
