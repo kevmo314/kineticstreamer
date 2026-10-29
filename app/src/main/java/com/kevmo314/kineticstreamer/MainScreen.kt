@@ -56,6 +56,8 @@ val REQUIRED_PERMISSIONS = listOf(
     Manifest.permission.RECORD_AUDIO
 )
 
+private data class StreamStats(val bitrate: Int, val fps: Float, val ice: String, val peer: String)
+
 @Composable
 fun MainScreen(
     settings: Settings,
@@ -108,6 +110,8 @@ fun MainScreen(
                 LaunchedEffect(stub) {
                     isStreaming.value = withContext(Dispatchers.IO) { stub.isStreaming }
                 }
+                // The service's start/stop aren't reentrant, so ignore taps while one is running.
+                val transitioning = remember(stub) { mutableStateOf(false) }
                 val currentBitrate = remember { mutableIntStateOf(0) }
                 val currentFps = remember { mutableStateOf(0f) }
                 val audioLevels = remember { mutableStateOf(emptyList<Float>()) }
@@ -130,12 +134,18 @@ fun MainScreen(
                 LaunchedEffect(isStreaming.value) {
                     if (isStreaming.value) {
                         while (isStreaming.value) {
-                            withContext(Dispatchers.IO) {
-                                currentBitrate.intValue = stub.currentBitrate
-                                currentFps.value = stub.currentFps
-                                iceConnectionState.value = stub.whipIceConnectionState ?: ""
-                                peerConnectionState.value = stub.whipPeerConnectionState ?: ""
+                            val stats = withContext(Dispatchers.IO) {
+                                StreamStats(
+                                    stub.currentBitrate,
+                                    stub.currentFps,
+                                    stub.whipIceConnectionState ?: "",
+                                    stub.whipPeerConnectionState ?: "",
+                                )
                             }
+                            currentBitrate.intValue = stats.bitrate
+                            currentFps.value = stats.fps
+                            iceConnectionState.value = stats.ice
+                            peerConnectionState.value = stats.peer
                             delay(250) // Update 4 times per second
                         }
                     } else {
@@ -279,16 +289,22 @@ fun MainScreen(
                             Button(
                                 onClick = {
                                     coroutineScope.launch {
-                                        if (isStreaming.value) {
-                                            withContext(Dispatchers.IO) { stub.stopStreaming() }
-                                            isStreaming.value = false
-                                        } else {
-                                            val configuration = settings.getStreamingConfiguration()
-                                            withContext(Dispatchers.IO) { stub.startStreaming(configuration) }
-                                            isStreaming.value = true
+                                        transitioning.value = true
+                                        try {
+                                            if (isStreaming.value) {
+                                                withContext(Dispatchers.IO) { stub.stopStreaming() }
+                                            } else {
+                                                val configuration = settings.getStreamingConfiguration()
+                                                withContext(Dispatchers.IO) { stub.startStreaming(configuration) }
+                                            }
+                                            // startStreaming can bail out on failure, so ask the service.
+                                            isStreaming.value = withContext(Dispatchers.IO) { stub.isStreaming }
+                                        } finally {
+                                            transitioning.value = false
                                         }
                                     }
                                 },
+                                enabled = !transitioning.value,
                                 modifier = Modifier.size(64.dp),
                                 shape = if (isStreaming.value) {
                                     RoundedCornerShape(2.dp)

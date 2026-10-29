@@ -129,7 +129,7 @@ class OutputNavigationTest {
     fun srt() = addEditDelete(
         OutputType.SRT, "SRT Output",
         mapOf("Host" to "srt.example.com", "Stream ID (optional)" to "a;b"),
-        "srt://srt.example.com:9000?streamid=a;b",
+        "srt://srt.example.com:9000?streamid=a%3Bb",
     )
 
     @Test

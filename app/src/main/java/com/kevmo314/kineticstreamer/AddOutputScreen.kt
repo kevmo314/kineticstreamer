@@ -259,7 +259,7 @@ fun AddSrtOutputScreen(
         isEditing = initial != null,
         buildUrl = {
             if (host.isBlank()) null
-            else "srt://$host:$port" + if (streamId.isNotBlank()) "?streamid=$streamId" else ""
+            else "srt://$host:$port" + if (streamId.isNotBlank()) "?streamid=${Uri.encode(streamId)}" else ""
         },
         onSave = onSave, onDelete = onDelete, navigateBack = navigateBack,
     ) {
@@ -287,7 +287,7 @@ fun AddRistOutputScreen(
         isEditing = initial != null,
         buildUrl = {
             if (host.isBlank()) null
-            else "rist://$host:$port" + if (cname.isNotBlank()) "?cname=$cname" else ""
+            else "rist://$host:$port" + if (cname.isNotBlank()) "?cname=${Uri.encode(cname)}" else ""
         },
         onSave = onSave, onDelete = onDelete, navigateBack = navigateBack,
     ) {
@@ -392,7 +392,8 @@ fun NavGraphBuilder.outputRoutes(settings: Settings, scope: CoroutineScope, navi
         OutputEditorRoute(
             settings, scope,
             entry.arguments?.getString("type"),
-            entry.arguments?.getString("index")?.toIntOrNull(),
+            // A malformed index becomes -1, which is treated as a missing output.
+            entry.arguments?.getString("index")?.toIntOrNull() ?: -1,
             navigateBack,
         )
     }
