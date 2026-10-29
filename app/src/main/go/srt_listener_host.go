@@ -54,6 +54,7 @@ import "C"
 
 import (
 	"fmt"
+	"io"
 	"unsafe"
 )
 
@@ -134,6 +135,15 @@ func (c *srtTestConn) Drain() []byte {
 		}
 		out = append(out, chunk[:int(n)]...)
 	}
+}
+
+// Read receives one packet; it returns io.EOF once the peer is gone or the conn is closed.
+func (c *srtTestConn) Read(p []byte) (int, error) {
+	n := C.srt_test_recv(c.sock, (*C.char)(unsafe.Pointer(&p[0])), C.int(len(p)))
+	if n <= 0 {
+		return 0, io.EOF
+	}
+	return int(n), nil
 }
 
 func (c *srtTestConn) Close() { C.srt_close(c.sock) }

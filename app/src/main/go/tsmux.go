@@ -15,6 +15,13 @@ type tsMux struct {
 	tracks []*mpegts.Track
 	bw     *bufio.Writer
 	mpw    *mpegts.Writer
+
+	// A fresh stream (first connection, or after reset) must start on a keyframe,
+	// otherwise a receiver can't decode until the next one.
+	sawKeyframe bool
+	// Parameter sets from the encoder's codec-config buffer, prepended to keyframes
+	// that don't carry their own.
+	paramSets [][]byte
 }
 
 // newTSMux muxes into w, flushing after every sample in chunks of at most size.
@@ -31,6 +38,7 @@ func (m *tsMux) reset() {
 	for _, t := range m.tracks {
 		*t = mpegts.Track{Codec: t.Codec}
 	}
+	m.sawKeyframe = false
 	m.bw = bufio.NewWriterSize(m.w, m.size)
 	m.mpw = mpegts.NewWriter(m.bw, m.tracks)
 }
@@ -44,6 +52,10 @@ func (m *tsMux) writeSample(t *mpegts.Track, buf []byte, ptsMicroseconds int64, 
 	isKeyframe := MediaCodecBufferFlag(mediaCodecFlags)&MediaCodecBufferFlagKeyFrame != 0
 	pts := ptsTo90k(ptsMicroseconds)
 
+	// MediaCodec's codec-config buffer is not a frame and its timestamp is meaningless (0).
+	// Video keeps it as the parameter sets (below); AAC config is already in the ADTS headers.
+	isConfig := MediaCodecBufferFlag(mediaCodecFlags)&MediaCodecBufferFlagCodecConfig != 0
+
 	var err error
 	switch t.Codec.(type) {
 	case *mpegts.CodecH264, *mpegts.CodecH265:
@@ -51,10 +63,32 @@ func (m *tsMux) writeSample(t *mpegts.Track, buf []byte, ptsMicroseconds int64, 
 		if len(nalus) == 0 {
 			return nil
 		}
+		if isConfig {
+			// The caller owns buf and may reuse it (JNI), so keep copies.
+			m.paramSets = nil
+			for _, n := range nalus {
+				m.paramSets = append(m.paramSets, append([]byte(nil), n...))
+			}
+			return nil
+		}
+		if isKeyframe {
+			m.sawKeyframe = true
+			if len(m.paramSets) > 0 && !isParamSet(t.Codec, nalus[0]) {
+				nalus = append(append([][]byte{}, m.paramSets...), nalus...)
+			}
+		} else if !m.sawKeyframe {
+			return nil
+		}
 		err = m.mpw.WriteH26x(t, pts, pts, isKeyframe, nalus)
 	case *mpegts.CodecOpus:
+		if isConfig {
+			return nil
+		}
 		err = m.mpw.WriteOpus(t, pts, [][]byte{buf})
 	case *mpegts.CodecMPEG4Audio:
+		if isConfig {
+			return nil
+		}
 		err = m.mpw.WriteMPEG4Audio(t, pts, [][]byte{buf})
 	default:
 		return nil
@@ -66,6 +100,19 @@ func (m *tsMux) writeSample(t *mpegts.Track, buf []byte, ptsMicroseconds int64, 
 		m.reset()
 	}
 	return err
+}
+
+// isParamSet reports whether nalu is an SPS/PPS (H.264) or VPS/SPS/PPS (H.265).
+func isParamSet(codec mpegts.Codec, nalu []byte) bool {
+	if len(nalu) == 0 {
+		return false
+	}
+	if _, ok := codec.(*mpegts.CodecH265); ok {
+		typ := (nalu[0] >> 1) & 0x3f
+		return typ >= 32 && typ <= 34
+	}
+	typ := nalu[0] & 0x1f
+	return typ == 7 || typ == 8
 }
 
 // splitNALUs splits an Annex B byte stream into individual NAL units.
