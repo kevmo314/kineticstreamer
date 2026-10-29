@@ -121,6 +121,15 @@ class AudioFeederTest {
     }
 
     @Test
+    fun trailingPartialFrameIsTruncated() {
+        val feeder = AudioFeeder()
+        feeder.offer(ByteArray(4 * 10 + 3) { 1 }, 0)
+        val dst = ByteBuffer.allocate(1000)
+        feeder.fill(dst)
+        assertEquals(40, dst.position())
+    }
+
+    @Test
     fun emptyAndTinyChunksAreIgnored() {
         val feeder = AudioFeeder()
         assertTrue(feeder.offer(ByteArray(0), 0))

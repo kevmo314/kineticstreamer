@@ -344,6 +344,7 @@ class StreamingService : Service() {
         lastVideoTimestampNanos = 0
         synchronized(frameTimestamps) { frameTimestamps.clear() }
         latestFps = 0f
+        lastBitrate = 0
         rtmpSourceRef.set(null)
 
         // Stop the GL thread drawing into the encoder surface before it is released
@@ -589,10 +590,15 @@ class StreamingService : Service() {
                     index: Int,
                     info: MediaCodec.BufferInfo
                 ) {
-                    val buffer = codec.getOutputBuffer(index) ?: return
-                    val array = ByteArray(info.size)
-                    buffer.position(info.offset)
-                    buffer.get(array)
+                    val array = try {
+                        val buffer = codec.getOutputBuffer(index) ?: return
+                        ByteArray(info.size).also {
+                            buffer.position(info.offset)
+                            buffer.get(it)
+                        }
+                    } catch (e: IllegalStateException) {
+                        return // Codec was stopped while this callback was queued
+                    }
 
                     // Normalize to stream start time - both audio and video use the same reference
                     // so they remain in sync while starting near zero for MPEG-TS compatibility
@@ -775,6 +781,7 @@ class StreamingService : Service() {
      */
     private fun pumpAudioInput(codec: MediaCodec, newIndex: Int?) {
         synchronized(audioInputLock) {
+            if (codec !== audioEncoder) return // torn down; index belongs to a dead codec
             if (newIndex != null) freeAudioInputs.addLast(newIndex)
             try {
                 while (freeAudioInputs.isNotEmpty()) {

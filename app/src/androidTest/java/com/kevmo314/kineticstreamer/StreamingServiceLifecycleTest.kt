@@ -73,6 +73,20 @@ class StreamingServiceLifecycleTest {
 
     @Test
     fun repeatedFailedStartsDoNotLeakOrReportStreaming() {
+        cycle(failing = true)
+    }
+
+    /** No enabled sinks: encoders, handler threads and executor are really created and torn down. */
+    @Test
+    fun repeatedSuccessfulStartsDoNotLeak() {
+        runBlocking {
+            Settings(DataStoreProvider.getDataStore(context))
+                .setOutputConfigurations(listOf(OutputConfiguration("srt://127.0.0.1:1", false)))
+        }
+        cycle(failing = false)
+    }
+
+    private fun cycle(failing: Boolean) {
         val svc = service!!
         val config = StreamingConfiguration("video/avc", "audio/mp4a-latm", 0)
 
@@ -86,7 +100,7 @@ class StreamingServiceLifecycleTest {
         val counts = mutableListOf<Int>()
         repeat(8) { i ->
             svc.startStreaming(config)
-            assertFalse("cycle $i: streaming after failed start", svc.isStreaming)
+            assertTrue("cycle $i: streaming after start (failing=$failing)", svc.isStreaming != failing)
             svc.stopStreaming()
             assertFalse("cycle $i: streaming after stop", svc.isStreaming)
             Thread.sleep(500)

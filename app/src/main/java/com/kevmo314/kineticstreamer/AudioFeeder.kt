@@ -64,7 +64,8 @@ class AudioFeeder(private val sampleRate: Int = 48000, private val capacity: Int
     /** Queues [stereoPcm]; returns false (and drops it) if the queue is full. */
     @Synchronized
     fun offer(stereoPcm: ByteArray, captureTimeNanos: Long): Boolean {
-        if (stereoPcm.size < BYTES_PER_FRAME) return true
+        val usable = stereoPcm.size / BYTES_PER_FRAME * BYTES_PER_FRAME
+        if (usable == 0) return true
         if (queue.size >= capacity) {
             droppedChunks++
             anchorNext = true
@@ -73,9 +74,9 @@ class AudioFeeder(private val sampleRate: Int = 48000, private val capacity: Int
         val captureUs = captureTimeNanos / 1000
         // A capture time far from where the previous chunk ended (source restarted/switched) is a gap.
         if (abs(captureUs - expectedNextUs) > MAX_JITTER_US) anchorNext = true
-        queue.addLast(Chunk(stereoPcm, captureUs, anchorNext))
+        queue.addLast(Chunk(if (usable == stereoPcm.size) stereoPcm else stereoPcm.copyOf(usable), captureUs, anchorNext))
         anchorNext = false
-        expectedNextUs = captureUs + stereoPcm.size / BYTES_PER_FRAME * 1_000_000L / sampleRate
+        expectedNextUs = captureUs + usable / BYTES_PER_FRAME * 1_000_000L / sampleRate
         return true
     }
 
