@@ -130,7 +130,8 @@ ExternalProject_Add(libsrt
         -DCMAKE_INSTALL_PREFIX=${CMAKE_INSTALL_PREFIX}
         -DCMAKE_C_FLAGS=-fPIC
         -DCMAKE_CXX_FLAGS=-fPIC
-        -DCMAKE_SHARED_LINKER_FLAGS=${PAGE_SIZE_LINKER_FLAGS}
+        # Hide the static OpenSSL symbols (also required for its ARM asm to link into a .so).
+        "-DCMAKE_SHARED_LINKER_FLAGS=${PAGE_SIZE_LINKER_FLAGS} -Wl,--exclude-libs,ALL"
         -DENABLE_BONDING=ON
         -DENABLE_APPS=OFF
         -DENABLE_STATIC=OFF
