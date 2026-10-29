@@ -103,7 +103,6 @@ build_jni() {
 
 cd "$SCRIPT_DIR"
 if [ "$STEP" = deps ]; then
-    echo "DEBUG perl=$OPENSSL_PERL"; ls -la "$OPENSSL_PERL" || true; ls /c/msys64/usr/bin/perl.exe || true; "$OPENSSL_PERL" -e 'print "perl ok $^V\n"' || true; which make perl || true; echo "DEBUG PATH=$PATH"
     # Each ABI is a separate cmake build, so they can run side by side.
     for_each_abi build_deps
 else
