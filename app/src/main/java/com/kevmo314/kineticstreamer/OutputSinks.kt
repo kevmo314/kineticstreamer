@@ -183,24 +183,24 @@ private class SinkWriter(
         lock.notify()
     }
 
-    /** Stops accepting writes and waits until [deadlineNanos] for the queue to drain. */
-    fun finish(deadlineNanos: Long) {
-        synchronized(lock) {
-            closed = true
-            lock.notifyAll()
-        }
-        thread.join(maxOf(1, (deadlineNanos - System.nanoTime()) / 1_000_000))
+    /** Stops accepting writes; the thread exits once the queue has drained. */
+    fun stop() = synchronized(lock) {
+        closed = true
+        lock.notifyAll()
     }
 
-    /** Discards whatever is still queued so the thread exits once its current write returns. */
-    fun abort() = synchronized(lock) { queue.clear() }
+    /** Waits until [deadlineNanos] for the queue to drain, then discards what is left. */
+    fun join(deadlineNanos: Long) {
+        thread.join(maxOf(1, (deadlineNanos - System.nanoTime()) / 1_000_000))
+        synchronized(lock) { queue.clear() }
+    }
 }
 
 /**
  * The enabled outputs, one sink each (any number per protocol), each written on its own thread
  * so network stalls never block the encoder callbacks or the other outputs. Closing drains
- * queued writes (up to [CLOSE_TIMEOUT_MS] in total), then closes every sink, which also
- * unblocks a stuck write. If any sink fails to connect, the ones already connected are closed
+ * queued writes (up to [CLOSE_TIMEOUT_MS] in total), then closes every sink (each on its own
+ * thread, as closing can wait behind a stuck write). If any sink fails to connect, the ones already connected are closed
  * and the constructor throws. [createSink] returns null for an unknown protocol.
  */
 class OutputSinks(
@@ -265,10 +265,16 @@ class OutputSinks(
     fun peerConnectionState(): String = sinks.firstNotNullOfOrNull { it.peerConnectionState } ?: "none"
 
     fun close() {
+        writers.forEach { it.stop() }
         val deadline = System.nanoTime() + CLOSE_TIMEOUT_MS * 1_000_000
-        writers.forEach { runCatching { it.finish(deadline) } }
-        writers.forEach { it.abort() }
-        sinks.forEach { runCatching { it.close() } }
+        writers.forEach { runCatching { it.join(deadline) } }
+        estimateListener = null // a write stuck past the deadline must not call into a dead session
+        // A native close can wait on the lock held by a stuck write, so give each its own thread
+        val closers = sinks.map { sink ->
+            Thread({ runCatching { sink.close() } }, "SinkClose").apply { isDaemon = true; start() }
+        }
+        val closeDeadline = System.nanoTime() + CLOSE_TIMEOUT_MS * 1_000_000
+        closers.forEach { it.join(maxOf(1, (closeDeadline - System.nanoTime()) / 1_000_000)) }
     }
 
     private companion object {

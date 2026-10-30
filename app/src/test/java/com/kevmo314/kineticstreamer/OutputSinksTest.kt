@@ -138,7 +138,7 @@ class OutputSinksTest {
     }
 
     /** Blocks every write until [release] is called, like an SRT sink on a dead link. */
-    private class StalledSink : OutputSink {
+    private class StalledSink(val closeUnblocksWrite: Boolean = true) : OutputSink {
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)
         @Volatile var closed = false
@@ -155,8 +155,8 @@ class OutputSinksTest {
         }
 
         override fun close() {
+            if (closeUnblocksWrite) release.countDown() else release.await() // native close can wait behind a stuck write
             closed = true
-            release.countDown() // closing a real sink unblocks its stuck write
         }
     }
 
@@ -168,8 +168,11 @@ class OutputSinksTest {
         }
     }
 
-    private fun stalledAndGood(capacity: Int = 256, onPli: () -> Unit = {}): Triple<OutputSinks, StalledSink, FakeSink> {
-        val stalled = StalledSink()
+    private fun stalledAndGood(
+        capacity: Int = 256,
+        stalled: StalledSink = StalledSink(),
+        onPli: () -> Unit = {},
+    ): Triple<OutputSinks, StalledSink, FakeSink> {
         val good = FakeSink("good")
         val s = OutputSinks(listOf(out("srt://a:1"), out("srt://b:2")), "m", { c, _: PLICallback ->
             if (c.url == "srt://a:1") stalled else good
@@ -206,9 +209,23 @@ class OutputSinksTest {
     }
 
     @Test
+    fun closeDoesNotHangWhenClosingABlockedSinkBlocks() {
+        val (s, stalled, good) = stalledAndGood(stalled = StalledSink(closeUnblocksWrite = false))
+        s.writeVideo(ByteArray(1), 0, 1) {}
+        assertTrue(stalled.entered.await(5, TimeUnit.SECONDS))
+        val start = System.nanoTime()
+        s.close()
+        val elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start)
+        assertTrue("close took ${elapsedMs}ms", elapsedMs < 7000)
+        assertTrue(good.closed)
+        stalled.release.countDown()
+        awaitUntil("stalled sink to finish closing") { stalled.closed }
+    }
+
+    @Test
     fun fullQueueDropsVideoUntilTheNextKeyframeAndAudioButNeverConfig() {
         val plis = AtomicInteger()
-        val (s, stalled, good) = stalledAndGood(capacity = 3) { plis.incrementAndGet() }
+        val (s, stalled, good) = stalledAndGood(capacity = 3, onPli = { plis.incrementAndGet() })
         // Wait for the healthy sink after each write so only the stalled queue can overflow
         fun video(pts: Long, flags: Int) {
             s.writeVideo(ByteArray(1), pts, flags) {}
