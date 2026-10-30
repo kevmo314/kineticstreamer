@@ -53,23 +53,6 @@ class SettingsTest {
     }
 
     @Test
-    fun resolution_roundTrips() {
-        val r = Resolution(1920, 1080)
-        assertEquals("1920x1080", r.toString())
-        assertEquals(r, Resolution.fromString(r.toString()))
-    }
-
-    @Test(expected = NumberFormatException::class)
-    fun resolution_rejectsNonNumeric() {
-        Resolution.fromString("axb")
-    }
-
-    @Test(expected = IndexOutOfBoundsException::class)
-    fun resolution_rejectsMissingSeparator() {
-        Resolution.fromString("1920")
-    }
-
-    @Test
     fun outputConfiguration_roundTripsUrlContainingColons() {
         val c = OutputConfiguration("srt://host:9000?streamid=a:b", true)
         assertEquals(c, OutputConfiguration.decode(c.encode()))
@@ -80,7 +63,6 @@ class SettingsTest {
     fun settings_defaults() = runBlocking {
         val s = settings()
         assertEquals(SupportedVideoCodec.H264, s.codec.first())
-        assertEquals(Resolution(1920, 1080), s.resolution.first())
         assertEquals(1024L * 1024 * 1024, s.recordingMaxCapacityBytes.first())
         assertTrue(s.outputConfigurations.first().isEmpty())
         assertEquals(false, s.rotateVideo180.first())
@@ -94,11 +76,9 @@ class SettingsTest {
             OutputConfiguration("whip://c/d", false),
         )
         s.setCodec(SupportedVideoCodec.AV1)
-        s.setResolution(Resolution(1280, 720))
         s.setBitrate(4_000_000)
         outputs.forEach { s.outputs.add(it) }
         assertEquals(SupportedVideoCodec.AV1, s.codec.first())
-        assertEquals(Resolution(1280, 720), s.resolution.first())
         assertEquals(4_000_000, s.bitrate.first())
         assertEquals(outputs, s.outputConfigurations.first())
     }

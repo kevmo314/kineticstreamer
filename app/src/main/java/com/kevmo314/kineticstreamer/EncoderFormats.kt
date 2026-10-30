@@ -4,6 +4,8 @@ import android.media.AudioFormat
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 
+// The output is fixed at 1080p: capture (UVC, RTMP), the preview surface and the renderer's
+// video texture are all sized for it, so there is no user-selectable resolution.
 const val VIDEO_WIDTH = 1920
 const val VIDEO_HEIGHT = 1080
 const val INITIAL_VIDEO_BITRATE = 2_000_000 // adjusted dynamically from the network estimate
@@ -47,3 +49,13 @@ fun audioEncoderFormat(opus: Boolean): MediaFormat {
         }
     }
 }
+
+/** The Android software AAC encoder (FDK AAC-LC) delays its output by 2048 samples at 48 kHz. */
+const val AAC_FALLBACK_ENCODER_DELAY_US = 2048 * 1_000_000L / 48000
+
+/**
+ * How late an AAC encoder emits audio relative to the input it has consumed. Uses the delay
+ * (in samples at 48 kHz) the codec reports in its output format when present, else [fallbackUs].
+ */
+fun aacEncoderDelayUs(reportedSamples: Int?, fallbackUs: Long = AAC_FALLBACK_ENCODER_DELAY_US): Long =
+    if (reportedSamples != null && reportedSamples >= 0) reportedSamples * 1_000_000L / 48000 else fallbackUs
