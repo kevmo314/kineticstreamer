@@ -209,21 +209,25 @@ class OutputSinksTest {
     fun fullQueueDropsVideoUntilTheNextKeyframeAndAudioButNeverConfig() {
         val plis = AtomicInteger()
         val (s, stalled, good) = stalledAndGood(capacity = 3) { plis.incrementAndGet() }
-        s.writeVideo(ByteArray(1), 0, 2) {} // codec config, taken by the writer thread
+        // Wait for the healthy sink after each write so only the stalled queue can overflow
+        fun video(pts: Long, flags: Int) {
+            s.writeVideo(ByteArray(1), pts, flags) {}
+            awaitUntil("good sink video $pts") { good.video.size == pts.toInt() + 1 }
+        }
+        video(0, 2) // codec config, taken by the stalled writer thread
         assertTrue(stalled.entered.await(5, TimeUnit.SECONDS))
         // The stalled sink's queue now fills: key, p, p
-        s.writeVideo(ByteArray(1), 1, 1) {}
-        s.writeVideo(ByteArray(1), 2, 0) {}
-        s.writeVideo(ByteArray(1), 3, 0) {}
+        video(1, 1)
+        video(2, 0)
+        video(3, 0)
         assertEquals(0, plis.get())
-        s.writeVideo(ByteArray(1), 4, 0) {} // full: dropped, asks for a keyframe
+        video(4, 0) // full: dropped, asks for a keyframe
         assertEquals(1, plis.get())
-        s.writeVideo(ByteArray(1), 5, 0) {} // still dropping, no second request
-        s.writeVideo(ByteArray(1), 6, 2) {} // config is kept even when full
-        s.writeAudio(ByteArray(1), 7, 0) // dropped
+        video(5, 0) // still dropping, no second request
+        video(6, 2) // config is kept even when full
+        s.writeAudio(ByteArray(1), 7, 0) // dropped by the stalled sink only
+        awaitUntil("good sink audio") { good.audio.size == 1 }
         assertEquals(1, plis.get())
-        // The healthy sink saw everything
-        awaitUntil("good sink") { good.video.size == 7 && good.audio.size == 1 }
         stalled.release.countDown()
         s.close()
         assertTrue(stalled.closed)
@@ -258,5 +262,37 @@ class OutputSinksTest {
         s.writeVideo(ByteArray(1), 7, 0) {}
         s.close()
         assertEquals(listOf(0L, 1L, 2L, 6L, 7L), got.toList())
+    }
+
+    @Test
+    fun keyframeRequestIsRepeatedIfTheFirstOneWasDroppedWhileFull() {
+        val plis = AtomicInteger()
+        val gate = CountDownLatch(1)
+        val started = CountDownLatch(1)
+        val got = CopyOnWriteArrayList<Long>()
+        val slow = object : OutputSink {
+            override fun writeVideo(data: ByteArray, ptsUs: Long, flags: Int): Long {
+                started.countDown()
+                gate.await()
+                got += ptsUs
+                return 0
+            }
+            override fun writeAudio(data: ByteArray, ptsUs: Long, flags: Int) {}
+            override fun close() {}
+        }
+        val s = OutputSinks(listOf(out("srt://a:1")), "m", { _, _: PLICallback -> slow }, 4) { plis.incrementAndGet() }
+        s.writeVideo(ByteArray(1), 0, 1) {} // in flight
+        assertTrue(started.await(5, TimeUnit.SECONDS))
+        for (pts in 1L..4L) s.writeVideo(ByteArray(1), pts, 0) {}
+        s.writeVideo(ByteArray(1), 5, 0) {} // full: dropped, first request
+        s.writeVideo(ByteArray(1), 6, 1) {} // the keyframe it asked for is dropped as well
+        assertEquals(1, plis.get())
+        gate.countDown()
+        awaitUntil("queue to drain") { got.size == 5 }
+        s.writeVideo(ByteArray(1), 7, 0) {} // room again but no keyframe yet: ask again
+        assertEquals(2, plis.get())
+        s.writeVideo(ByteArray(1), 8, 1) {}
+        s.close()
+        assertEquals(listOf(0L, 1L, 2L, 3L, 4L, 8L), got.toList())
     }
 }

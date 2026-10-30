@@ -121,6 +121,9 @@ private class SinkWriter(
     private var closed = false
     private var dropUntilKeyframe = false
 
+    // The requested keyframe may have arrived while the queue was still full, and been dropped
+    private var keyframeMayBeLost = false
+
     /** The sink's latest bandwidth estimate in bps, 0 if it has none. */
     @Volatile var estimate = 0L
         private set
@@ -144,7 +147,7 @@ private class SinkWriter(
     }
 
     fun writeVideo(data: ByteArray, ptsUs: Long, flags: Int) {
-        var startedDropping = false
+        var requestKeyframe = false
         synchronized(lock) {
             if (closed) return
             val keep = when {
@@ -160,11 +163,12 @@ private class SinkWriter(
                     onEstimate()
                 }
             } else {
-                startedDropping = !dropUntilKeyframe
+                requestKeyframe = !dropUntilKeyframe || (keyframeMayBeLost && queue.size <= capacity / 2)
+                if (requestKeyframe) keyframeMayBeLost = queue.size >= capacity
                 dropUntilKeyframe = true
             }
         }
-        if (startedDropping) {
+        if (requestKeyframe) {
             Log.w(TAG, "Output queue full, dropping video until the next keyframe")
             onDrop()
         }
