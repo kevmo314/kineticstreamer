@@ -6,6 +6,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 class OutputSinksTest {
     private class FakeSink(val url: String, val estimate: Long = 0, val ice: String? = null) : OutputSink {
@@ -69,7 +72,7 @@ class OutputSinksTest {
         val got = CopyOnWriteArrayList<Long>()
         s.writeVideo(ByteArray(1), 0, 0) { got += it }
         s.close()
-        assertEquals(listOf(3_000_000L), got.toList())
+        assertEquals(3_000_000L, got.last()) // one report per sink; the last sees both
     }
 
     @Test
@@ -79,7 +82,7 @@ class OutputSinksTest {
         val got = CopyOnWriteArrayList<Long>()
         s.writeVideo(ByteArray(1), 0, 0) { got += it }
         s.close()
-        assertEquals(listOf(0L), got.toList())
+        assertEquals(0L, got.last())
     }
 
     @Test
@@ -131,6 +134,129 @@ class OutputSinksTest {
         s.close()
         assertEquals(listOf(7L), good.video)
         assertEquals(listOf(8L), good.audio)
-        assertEquals(listOf(1_000_000L), got.toList())
+        assertEquals(1_000_000L, got.last())
+    }
+
+    /** Blocks every write until [release] is called, like an SRT sink on a dead link. */
+    private class StalledSink : OutputSink {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        @Volatile var closed = false
+
+        override fun writeVideo(data: ByteArray, ptsUs: Long, flags: Int): Long {
+            entered.countDown()
+            release.await()
+            return 0
+        }
+
+        override fun writeAudio(data: ByteArray, ptsUs: Long, flags: Int) {
+            entered.countDown()
+            release.await()
+        }
+
+        override fun close() {
+            closed = true
+            release.countDown() // closing a real sink unblocks its stuck write
+        }
+    }
+
+    private fun awaitUntil(what: String, cond: () -> Boolean) {
+        val end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        while (!cond()) {
+            if (System.nanoTime() > end) fail("timed out waiting for $what")
+            Thread.sleep(5)
+        }
+    }
+
+    private fun stalledAndGood(capacity: Int = 256, onPli: () -> Unit = {}): Triple<OutputSinks, StalledSink, FakeSink> {
+        val stalled = StalledSink()
+        val good = FakeSink("good")
+        val s = OutputSinks(listOf(out("srt://a:1"), out("srt://b:2")), "m", { c, _: PLICallback ->
+            if (c.url == "srt://a:1") stalled else good
+        }, capacity, onPli)
+        return Triple(s, stalled, good)
+    }
+
+    @Test
+    fun aStalledSinkDoesNotDelayTheOthers() {
+        val (s, stalled, good) = stalledAndGood()
+        for (i in 0 until 50L) {
+            s.writeVideo(ByteArray(1), i, if (i == 0L) 1 else 0) {}
+            s.writeAudio(ByteArray(1), i, 0)
+        }
+        awaitUntil("good sink to receive everything") { good.video.size == 50 && good.audio.size == 50 }
+        assertEquals((0L until 50L).toList(), good.video.toList())
+        assertEquals((0L until 50L).toList(), good.audio.toList())
+        assertTrue(stalled.entered.await(5, TimeUnit.SECONDS))
+        s.close()
+        assertTrue(stalled.closed && good.closed)
+    }
+
+    @Test
+    fun closeDoesNotHangOnABlockedSink() {
+        val (s, stalled, good) = stalledAndGood()
+        s.writeVideo(ByteArray(1), 0, 1) {}
+        assertTrue(stalled.entered.await(5, TimeUnit.SECONDS))
+        val start = System.nanoTime()
+        s.close()
+        val elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start)
+        assertTrue("close took ${elapsedMs}ms", elapsedMs < 4000)
+        assertTrue(stalled.closed && good.closed)
+        assertEquals(listOf(0L), good.video.toList())
+    }
+
+    @Test
+    fun fullQueueDropsVideoUntilTheNextKeyframeAndAudioButNeverConfig() {
+        val plis = AtomicInteger()
+        val (s, stalled, good) = stalledAndGood(capacity = 3) { plis.incrementAndGet() }
+        s.writeVideo(ByteArray(1), 0, 2) {} // codec config, taken by the writer thread
+        assertTrue(stalled.entered.await(5, TimeUnit.SECONDS))
+        // The stalled sink's queue now fills: key, p, p
+        s.writeVideo(ByteArray(1), 1, 1) {}
+        s.writeVideo(ByteArray(1), 2, 0) {}
+        s.writeVideo(ByteArray(1), 3, 0) {}
+        assertEquals(0, plis.get())
+        s.writeVideo(ByteArray(1), 4, 0) {} // full: dropped, asks for a keyframe
+        assertEquals(1, plis.get())
+        s.writeVideo(ByteArray(1), 5, 0) {} // still dropping, no second request
+        s.writeVideo(ByteArray(1), 6, 2) {} // config is kept even when full
+        s.writeAudio(ByteArray(1), 7, 0) // dropped
+        assertEquals(1, plis.get())
+        // The healthy sink saw everything
+        awaitUntil("good sink") { good.video.size == 7 && good.audio.size == 1 }
+        stalled.release.countDown()
+        s.close()
+        assertTrue(stalled.closed)
+    }
+
+    @Test
+    fun videoResumesAtAKeyframeAfterADrop() {
+        val gate = CountDownLatch(1)
+        val started = CountDownLatch(1)
+        val got = CopyOnWriteArrayList<Long>()
+        val slow = object : OutputSink {
+            override fun writeVideo(data: ByteArray, ptsUs: Long, flags: Int): Long {
+                started.countDown()
+                gate.await()
+                got += ptsUs
+                return 0
+            }
+            override fun writeAudio(data: ByteArray, ptsUs: Long, flags: Int) {}
+            override fun close() {}
+        }
+        val s = OutputSinks(listOf(out("srt://a:1")), "m", { _, _: PLICallback -> slow }, 2) {}
+        s.writeVideo(ByteArray(1), 0, 1) {} // in flight
+        assertTrue(started.await(5, TimeUnit.SECONDS))
+        s.writeVideo(ByteArray(1), 1, 0) {}
+        s.writeVideo(ByteArray(1), 2, 0) {}
+        s.writeVideo(ByteArray(1), 3, 0) {} // dropped
+        s.writeVideo(ByteArray(1), 4, 0) {} // dropped: previous gap
+        gate.countDown()
+        awaitUntil("queue to drain") { got.size == 3 }
+        s.writeVideo(ByteArray(1), 5, 0) {} // still no keyframe: dropped
+        s.writeVideo(ByteArray(1), 6, 1) {} // keyframe resumes
+        s.writeVideo(ByteArray(1), 7, 0) {}
+        s.close()
+        assertEquals(listOf(0L, 1L, 2L, 6L, 7L), got.toList())
     }
 }
