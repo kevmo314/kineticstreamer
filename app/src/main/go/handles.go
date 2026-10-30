@@ -40,3 +40,21 @@ func (h *Handles[T]) Remove(handle int64) (T, bool) {
 	delete(h.m, handle)
 	return v, ok
 }
+
+// FindOrAdd returns the handle of the first value for which match is true, or
+// stores v and returns its new handle.
+func (h *Handles[T]) FindOrAdd(v T, match func(T) bool) int64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for id, e := range h.m {
+		if match(e) {
+			return id
+		}
+	}
+	if h.m == nil {
+		h.m = make(map[int64]T)
+	}
+	h.next++
+	h.m[h.next] = v
+	return h.next
+}

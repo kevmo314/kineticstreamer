@@ -20,7 +20,8 @@ type tsMux struct {
 
 	// A fresh stream (first connection, or after reset) must start on a keyframe,
 	// otherwise a receiver can't decode until the next one.
-	sawKeyframe bool
+	// Tracked per track: one video track's keyframe must not unblock the others.
+	sawKeyframe map[*mpegts.Track]bool
 	// Parameter sets from the encoder's codec-config buffer, prepended to keyframes
 	// that don't carry their own.
 	paramSets map[*mpegts.Track][][]byte
@@ -40,7 +41,7 @@ func (m *tsMux) reset() {
 	for _, t := range m.tracks {
 		*t = mpegts.Track{Codec: t.Codec}
 	}
-	m.sawKeyframe = false
+	m.sawKeyframe = map[*mpegts.Track]bool{}
 	m.bw = bufio.NewWriterSize(m.w, m.size)
 	m.mpw = mpegts.NewWriter(m.bw, m.tracks)
 }
@@ -74,11 +75,11 @@ func (m *tsMux) writeSample(t *mpegts.Track, buf []byte, ptsMicroseconds int64, 
 			return nil
 		}
 		if isKeyframe {
-			m.sawKeyframe = true
+			m.sawKeyframe[t] = true
 			if ps := m.paramSets[t]; len(ps) > 0 && !isParamSet(t.Codec, nalus[0]) {
 				nalus = append(append([][]byte{}, ps...), nalus...)
 			}
-		} else if !m.sawKeyframe {
+		} else if !m.sawKeyframe[t] {
 			return nil
 		}
 		err = m.mpw.WriteH26x(t, pts, pts, isKeyframe, nalus)
