@@ -63,9 +63,7 @@ class StreamingService : Service() {
         private const val TAG = "StreamingService"
         private const val NOTIFICATION_ID = 68448
         private const val NOTIFICATION_CHANNEL = "KINETIC_STREAMER"
-
-        // The Android software AAC encoder (FDK AAC-LC) delays its output by 2048 samples at 48 kHz.
-        private const val AAC_ENCODER_DELAY_US = 2048 * 1_000_000L / 48000
+        private const val KEY_ENCODER_DELAY = "encoder-delay" // MediaFormat.KEY_ENCODER_DELAY is hidden
 
         /**
          * Test hook: when set before the service is created, replaces camera and microphone
@@ -382,11 +380,12 @@ class StreamingService : Service() {
         video.configure(videoFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         videoEncoderInputSurface = video.createInputSurface()
 
-        // Only the software encoder's delay is known; vendor encoders are left uncompensated.
-        val aacDelayKnown = !useOpus && (audioEncoderName.startsWith("c2.android.aac") || audioEncoderName.startsWith("OMX.google.aac"))
+        // The delay comes from the codec's output format when it reports one; failing that only the
+        // software encoder's is known, and vendor encoders are left uncompensated.
+        val aacFallbackKnown = !useOpus && (audioEncoderName.startsWith("c2.android.aac") || audioEncoderName.startsWith("OMX.google.aac"))
         val audioHandlerThread = startHandlerThread("StreamingService-Audio").also { audioThread = it }
         val audio = MediaCodec.createByCodecName(audioEncoderName).also { audioEncoder = it }
-        audio.setCallback(audioCallback(if (aacDelayKnown) AAC_ENCODER_DELAY_US else 0L), Handler(audioHandlerThread.looper))
+        audio.setCallback(audioCallback(!useOpus, if (aacFallbackKnown) AAC_FALLBACK_ENCODER_DELAY_US else 0L), Handler(audioHandlerThread.looper))
         audio.configure(audioFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
 
         lastBitrate = INITIAL_VIDEO_BITRATE
@@ -445,8 +444,15 @@ class StreamingService : Service() {
         }
     }
 
-    /** [delayUs] is how late the encoder emits audio relative to the input it has consumed. */
-    private fun audioCallback(delayUs: Long) = object : MediaCodec.Callback() {
+    /**
+     * The encoder emits audio late relative to the input it has consumed. For AAC that delay is
+     * read from the output format ("encoder-delay", in samples); [fallbackDelayUs] applies until
+     * (and unless) the codec reports one.
+     */
+    private fun audioCallback(aac: Boolean, fallbackDelayUs: Long) = object : MediaCodec.Callback() {
+        @Volatile
+        private var delayUs = fallbackDelayUs
+
         override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {
             pumpAudioInput(codec, index)
         }
@@ -475,6 +481,11 @@ class StreamingService : Service() {
 
         override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
             Log.i(TAG, "Audio encoder output format changed: $format")
+            if (aac) {
+                val reported = if (format.containsKey(KEY_ENCODER_DELAY)) format.getInteger(KEY_ENCODER_DELAY) else null
+                delayUs = aacEncoderDelayUs(reported, fallbackDelayUs)
+                Log.i(TAG, "AAC encoder delay ${delayUs}us (${if (reported != null) "reported $reported samples" else "fallback"})")
+            }
         }
     }
 

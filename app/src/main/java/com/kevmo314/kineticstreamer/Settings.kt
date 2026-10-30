@@ -39,21 +39,9 @@ fun bytesToString(bytes: Long): String {
     return String.format("%.1f %sB", bytes / unit.toDouble().pow(exp.toDouble()), pre)
 }
 
-data class Resolution(val width: Int, val height: Int) {
-    override fun toString(): String = "${width}x${height}"
-
-    companion object {
-        fun fromString(string: String): Resolution {
-            val (width, height) = string.split("x")
-            return Resolution(width.toInt(), height.toInt())
-        }
-    }
-}
-
 class Settings(private val dataStore: DataStore<Preferences>) {
     private val _codec = stringPreferencesKey("codec")
     private val _bitrate = intPreferencesKey("bitrate")
-    private val _resolution = stringPreferencesKey("resolution")
     private val _recordingMaxCapacityBytes = longPreferencesKey("recording_max_capacity_bytes")
     private val _selectedVideoDevice = stringPreferencesKey("selected_video_device")
     private val _selectedAudioDevice = intPreferencesKey("selected_audio_device_id")
@@ -71,14 +59,6 @@ class Settings(private val dataStore: DataStore<Preferences>) {
 
     suspend fun setBitrate(bitrate: Int) {
         dataStore.edit { it[_bitrate] = bitrate }
-    }
-
-    val resolution = dataStore.data.map {
-        Resolution.fromString(it[_resolution] ?: "1920x1080")
-    }
-
-    suspend fun setResolution(resolution: Resolution) {
-        dataStore.edit { it[_resolution] = resolution.toString() }
     }
 
     val outputs = OutputRepository(dataStore)
