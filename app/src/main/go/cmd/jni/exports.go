@@ -24,12 +24,6 @@ var (
 	whipSinks  kinetic.Handles[*whipEntry]
 )
 
-// mu and nextHandle are used by the RTMP tables in exports_rtmp.go.
-var (
-	mu         sync.RWMutex
-	nextHandle int64 = 1
-)
-
 // pliHook holds the JNI global reference of a Kotlin PLICallback. The
 // reference is released under the same lock that guards calls into Java, so a
 // concurrent close can never delete it while a callback is in flight.

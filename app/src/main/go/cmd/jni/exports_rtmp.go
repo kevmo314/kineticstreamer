@@ -16,8 +16,8 @@ import (
 
 // RTMP-specific storage (only on 64-bit platforms)
 var (
-	rtmpServers = make(map[int64]*kinetic.RTMPServer)
-	rtmpSources = make(map[int64]*kinetic.RTMPSource)
+	rtmpServers kinetic.Handles[*kinetic.RTMPServer]
+	rtmpSources kinetic.Handles[*kinetic.RTMPSource]
 )
 
 // RTMP Server exports
@@ -33,13 +33,7 @@ func GoCreateRTMPServer(port int32) (handle int64) {
 
 	server := kinetic.NewRTMPServer(int(port))
 
-	mu.Lock()
-	handle = nextHandle
-	nextHandle++
-	rtmpServers[handle] = server
-	mu.Unlock()
-
-	return handle
+	return rtmpServers.Add(server)
 }
 
 //export GoRTMPServerStart
@@ -50,9 +44,7 @@ func GoRTMPServerStart(handle int64) int32 {
 		}
 	}()
 
-	mu.RLock()
-	server, ok := rtmpServers[handle]
-	mu.RUnlock()
+	server, ok := rtmpServers.Get(handle)
 
 	if !ok {
 		return 0
@@ -69,10 +61,7 @@ func GoRTMPServerStart(handle int64) int32 {
 //export GoRTMPServerStop
 func GoRTMPServerStop(handle int64) {
 	// Stop can block on the network; never do it under the global lock.
-	mu.Lock()
-	server, ok := rtmpServers[handle]
-	delete(rtmpServers, handle)
-	mu.Unlock()
+	server, ok := rtmpServers.Remove(handle)
 	if ok {
 		server.Stop()
 	}
@@ -80,9 +69,7 @@ func GoRTMPServerStop(handle int64) {
 
 //export GoRTMPServerGetPort
 func GoRTMPServerGetPort(handle int64) int32 {
-	mu.RLock()
-	server, ok := rtmpServers[handle]
-	mu.RUnlock()
+	server, ok := rtmpServers.Get(handle)
 
 	if !ok {
 		return 0
@@ -93,9 +80,7 @@ func GoRTMPServerGetPort(handle int64) int32 {
 
 //export GoRTMPServerGetSource
 func GoRTMPServerGetSource(handle int64) int64 {
-	mu.RLock()
-	server, ok := rtmpServers[handle]
-	mu.RUnlock()
+	server, ok := rtmpServers.Get(handle)
 
 	if !ok {
 		return 0
@@ -106,30 +91,12 @@ func GoRTMPServerGetSource(handle int64) int64 {
 		return 0
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
-	return rtmpSourceHandle(source)
-}
-
-// rtmpSourceHandle returns the existing handle for source, or allocates one.
-// Callers must hold mu.
-func rtmpSourceHandle(source *kinetic.RTMPSource) int64 {
-	for h, s := range rtmpSources {
-		if s == source {
-			return h
-		}
-	}
-	h := nextHandle
-	nextHandle++
-	rtmpSources[h] = source
-	return h
+	return rtmpSources.FindOrAdd(source, func(s *kinetic.RTMPSource) bool { return s == source })
 }
 
 //export GoRTMPServerWaitForSource
 func GoRTMPServerWaitForSource(handle int64, timeoutMs int32) int64 {
-	mu.RLock()
-	server, ok := rtmpServers[handle]
-	mu.RUnlock()
+	server, ok := rtmpServers.Get(handle)
 
 	if !ok {
 		return 0
@@ -140,9 +107,7 @@ func GoRTMPServerWaitForSource(handle int64, timeoutMs int32) int64 {
 		return 0
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
-	return rtmpSourceHandle(source)
+	return rtmpSources.FindOrAdd(source, func(s *kinetic.RTMPSource) bool { return s == source })
 }
 
 //export GoRTMPSourceReadVideoFrame
@@ -153,9 +118,7 @@ func GoRTMPSourceReadVideoFrame(handle int64, dataPtr *unsafe.Pointer, sizePtr *
 		}
 	}()
 
-	mu.RLock()
-	source, ok := rtmpSources[handle]
-	mu.RUnlock()
+	source, ok := rtmpSources.Get(handle)
 
 	if !ok {
 		return 0
@@ -180,9 +143,7 @@ func GoRTMPSourceReadAudioFrame(handle int64, dataPtr *unsafe.Pointer, sizePtr *
 		}
 	}()
 
-	mu.RLock()
-	source, ok := rtmpSources[handle]
-	mu.RUnlock()
+	source, ok := rtmpSources.Get(handle)
 
 	if !ok {
 		return 0
@@ -201,9 +162,7 @@ func GoRTMPSourceReadAudioFrame(handle int64, dataPtr *unsafe.Pointer, sizePtr *
 
 //export GoRTMPSourceGetVideoPTS
 func GoRTMPSourceGetVideoPTS(handle int64) int64 {
-	mu.RLock()
-	source, ok := rtmpSources[handle]
-	mu.RUnlock()
+	source, ok := rtmpSources.Get(handle)
 
 	if !ok {
 		return 0
@@ -214,9 +173,7 @@ func GoRTMPSourceGetVideoPTS(handle int64) int64 {
 
 //export GoRTMPSourceGetAudioPTS
 func GoRTMPSourceGetAudioPTS(handle int64) int64 {
-	mu.RLock()
-	source, ok := rtmpSources[handle]
-	mu.RUnlock()
+	source, ok := rtmpSources.Get(handle)
 
 	if !ok {
 		return 0
@@ -227,9 +184,7 @@ func GoRTMPSourceGetAudioPTS(handle int64) int64 {
 
 //export GoRTMPSourceIsClosed
 func GoRTMPSourceIsClosed(handle int64) int32 {
-	mu.RLock()
-	source, ok := rtmpSources[handle]
-	mu.RUnlock()
+	source, ok := rtmpSources.Get(handle)
 
 	if !ok {
 		return 1 // Treat missing as closed
@@ -243,10 +198,7 @@ func GoRTMPSourceIsClosed(handle int64) int32 {
 
 //export GoRTMPSourceClose
 func GoRTMPSourceClose(handle int64) {
-	mu.Lock()
-	source, ok := rtmpSources[handle]
-	delete(rtmpSources, handle)
-	mu.Unlock()
+	source, ok := rtmpSources.Remove(handle)
 	if ok {
 		source.Close()
 	}
